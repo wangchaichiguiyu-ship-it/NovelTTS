@@ -356,3 +356,114 @@ def test_unknown_chapter_returns_error(
 ) -> None:
     assert run_cli(workdir, "parse") == 0
     assert run_cli(workdir, "synth", "--chapter", "c999", "--dry-run") == 1
+
+
+# --------------------------------------------------------------------------- #
+# 本机覆盖配置（config.local.yaml）
+# --------------------------------------------------------------------------- #
+# 起因：用 tar 覆盖式部署代码时会把 config.yaml 一起冲掉，导致云端被改好的
+# 模型绝对路径丢失（回退成 HuggingFace 仓库 id，而云端连不上 HF）。
+# 因此把「机器相关设置」移到不入库的 config.local.yaml。
+
+
+def test_local_config_overrides_main(workdir: Path) -> None:
+    """config.local.yaml 应覆盖 config.yaml 里显式出现的字段。"""
+    import os
+
+    (workdir / "config.local.yaml").write_text(
+        "generation:\n  model_path: /root/models/Qwen3-TTS-12Hz-1.7B-Base\n  batch_size: 8\n",
+        encoding="utf-8",
+    )
+    previous = Path.cwd()
+    os.chdir(workdir)
+    try:
+        from noveltts.cli import _load_config, build_parser
+
+        args = build_parser().parse_args(["info"])
+        config = _load_config(args)
+    finally:
+        os.chdir(previous)
+
+    assert config.generation.model_path == "/root/models/Qwen3-TTS-12Hz-1.7B-Base"
+    assert config.generation.batch_size == 8
+    # 本机文件没写的字段必须保持主配置的值
+    assert config.generation.language == "dummy-model" or config.generation.language == "English"
+
+
+def test_local_config_only_overrides_provided_fields(workdir: Path) -> None:
+    """本机文件只写一行时，不能把其余字段重置成默认值。"""
+    import os
+
+    (workdir / "config.local.yaml").write_text(
+        "generation:\n  batch_size: 12\n", encoding="utf-8"
+    )
+    previous = Path.cwd()
+    os.chdir(workdir)
+    try:
+        from noveltts.cli import _load_config, build_parser
+
+        args = build_parser().parse_args(["info"])
+        config = _load_config(args)
+    finally:
+        os.chdir(previous)
+
+    assert config.generation.batch_size == 12
+    # 主配置里的值不能被冲掉
+    assert config.generation.model_path == "dummy-model"
+    assert config.audio.speech_rate == 1.0
+
+
+def test_local_config_absent_is_fine(workdir: Path) -> None:
+    import os
+
+    previous = Path.cwd()
+    os.chdir(workdir)
+    try:
+        from noveltts.cli import _load_config, build_parser
+
+        args = build_parser().parse_args(["info"])
+        config = _load_config(args)
+    finally:
+        os.chdir(previous)
+    assert config.generation.model_path == "dummy-model"
+
+
+def test_explicit_config_ignores_local_config(workdir: Path) -> None:
+    """显式 -c 指定配置时不应再叠加本机文件，避免串味。"""
+    import os
+
+    (workdir / "config.local.yaml").write_text(
+        "generation:\n  batch_size: 99\n", encoding="utf-8"
+    )
+    previous = Path.cwd()
+    os.chdir(workdir)
+    try:
+        # 用 run_cli 走的是显式 -c config.yaml
+        assert run_cli(workdir, "info") == 0
+        from noveltts.cli import _load_config, build_parser
+
+        args = build_parser().parse_args(["-c", "config.yaml", "info"])
+        config = _load_config(args)
+    finally:
+        os.chdir(previous)
+    assert config.generation.batch_size != 99
+
+
+def test_local_config_unknown_key_warns_but_works(
+    workdir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import os
+
+    (workdir / "config.local.yaml").write_text(
+        "generation:\n  batch_size: 5\n  not_a_real_option: 1\n", encoding="utf-8"
+    )
+    previous = Path.cwd()
+    os.chdir(workdir)
+    try:
+        from noveltts.cli import _load_config, build_parser
+
+        args = build_parser().parse_args(["info"])
+        config = _load_config(args)
+    finally:
+        os.chdir(previous)
+    assert config.generation.batch_size == 5

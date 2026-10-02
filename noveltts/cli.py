@@ -49,8 +49,20 @@ from .utils import (
 
 logger = get_logger("cli")
 
-#: 默认配置文件（放在项目根目录）。
+#: 默认配置文件（放在项目根目录，**入库**）。
 DEFAULT_CONFIG_NAME = "config.yaml"
+
+#: 本机覆盖配置（**不入库**）。
+#:
+#: 为什么需要这个：``config.yaml`` 是入库的、团队共享的，里面的
+#: ``model_path`` 等值必须是「通用默认值」；而每台机器的路径都不一样
+#: （本地 Mac 与云端实例的模型目录不同）。
+#: 如果直接改 ``config.yaml``，那么每次用 git pull / 重新部署覆盖代码时，
+#: 这些本机设置就会被冲掉——**这是实际踩过的坑**。
+#:
+#: 因此约定：机器相关的设置写进 ``config.local.yaml``，它以**深层覆盖**
+#: 的方式盖在 ``config.yaml`` 之上，且被 .gitignore 排除。
+LOCAL_CONFIG_NAME = "config.local.yaml"
 
 
 # --------------------------------------------------------------------------- #
@@ -255,11 +267,43 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _load_config(args: argparse.Namespace) -> AppConfig:
-    """加载配置，并应用命令行覆盖。"""
+    """加载配置，并应用「本机覆盖」与命令行覆盖。
+
+    优先级（低 -> 高）::
+
+        内置默认值  <  config.yaml  <  config.local.yaml  <  命令行参数
+
+    ``config.local.yaml`` 用来放**机器相关**的设置（模型绝对路径、设备、
+    批大小等），它不入库，因此代码更新不会冲掉本机配置。
+
+    Raises:
+        FileNotFoundError: 显式指定的配置文件不存在。
+        ValueError: 路径或参数非法。
+    """
     config_path = args.config
+    # 用默认路径查找时的基准目录（也是 config.local.yaml 的查找目录）
+    default_root = Path.cwd()
+    root: Path | None = None
     if config_path is None:
-        candidate = Path.cwd() / DEFAULT_CONFIG_NAME
-        config_path = str(candidate) if candidate.is_file() else None
+        candidate = default_root / DEFAULT_CONFIG_NAME
+        if candidate.is_file():
+            config_path = str(candidate)
+            root = default_root
+        else:
+            root = default_root
+    else:
+        explicit = Path(config_path).expanduser().resolve()
+        root = explicit.parent
+
+    # --- 本机覆盖 ---
+    # 只有「用默认路径找到 config.yaml」时才自动叠加，避免显式 -c 时意外串味。
+    # 注意 root 在上面的两个分支里都要赋值，否则 config.yaml 存在时 root 会是
+    # None，本机覆盖就永远找不到（这是刚写这个功能时踩的坑）。
+    local_config: Path | None = None
+    if args.config is None and root is not None:
+        candidate = root / LOCAL_CONFIG_NAME
+        if candidate.is_file():
+            local_config = candidate
 
     overrides: dict[str, Any] = {}
     if getattr(args, "device", None):
@@ -283,10 +327,74 @@ def _load_config(args: argparse.Namespace) -> AppConfig:
     if getattr(args, "keep_wav", False):
         overrides.setdefault("encode", {})["keep_wav"] = True
 
-    config = AppConfig.load(config_path, overrides=overrides or None)
+    config = AppConfig.load(config_path, overrides=overrides or None, root=root)
+    if local_config is not None:
+        # 本机覆盖：以「config.local.yaml 优先」的方式再叠一层
+        local = AppConfig.load(
+            local_config,
+            overrides=overrides or None,
+            root=root,
+        )
+        config = _overlay_config(config, local, local_config)
     config.project.ensure_dirs()
     logger.debug("配置来源：%s", config.config_path or "（内置默认值）")
+    if local_config is not None:
+        logger.debug("已叠加本机覆盖：%s", local_config)
     return config
+
+
+def _overlay_config(base: AppConfig, local: AppConfig, local_path: Path) -> AppConfig:
+    """把本机覆盖配置叠到主配置之上。
+
+    只覆盖 ``config.local.yaml`` 里**显式出现**的字段，其余保持主配置的值。
+    这样本机文件可以只写一行 ``model_path``，而不必复制整份配置。
+
+    Args:
+        base: 主配置（``config.yaml``）。
+        local: 本机覆盖（``config.local.yaml``）。
+        local_path: 本机文件路径（仅用于日志）。
+
+    Returns:
+        合并后的 :class:`~noveltts.config.AppConfig`（新对象，不修改入参）。
+    """
+    from dataclasses import asdict, fields, replace
+
+    from .config import _load_yaml  # 局部导入：避免顶层循环依赖
+
+    raw = _load_yaml(local_path)
+    # 只保留本机文件里真实写了的字段，避免用默认值把主配置覆盖掉
+    merged_sections: dict[str, Any] = {}
+    for section in fields(AppConfig):
+        name = section.name
+        if name == "config_path" or name not in raw:
+            continue
+        provided = raw[name]
+        if not isinstance(provided, dict):
+            merged_sections[name] = provided
+            continue
+        current = asdict(getattr(base, name))
+        filtered = {k: v for k, v in provided.items() if k in current}
+        unknown = set(provided) - set(current)
+        if unknown:
+            logger.warning(
+                "%s 的 %s 段有未知配置项，已忽略：%s",
+                local_path.name,
+                name,
+                "、".join(sorted(unknown)),
+            )
+        merged_sections[name] = replace(getattr(base, name), **filtered)
+
+    if not merged_sections:
+        return base
+
+    logger.info(
+        "已叠加本机配置 %s（覆盖：%s）",
+        local_path.name,
+        "、".join(sorted(merged_sections)),
+    )
+    result = replace(base, **merged_sections)
+    result.config_path = base.config_path
+    return result
 
 
 # --------------------------------------------------------------------------- #
