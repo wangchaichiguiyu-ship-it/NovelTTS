@@ -413,6 +413,37 @@ generation:
   attn_implementation: auto # CUDA 上自动用 flash_attention_2
 ```
 
+### 3.1 云端要改的路径放 config.local.yaml（不要改 config.yaml）
+
+`config.yaml` 是**入库、团队共享**的，里面的路径是通用默认值。
+每台机器的模型路径不同，如果你直接改 `config.yaml`，
+那么下次 `git pull` 或用 tar 覆盖更新代码时，**你的改动会被冲掉**
+（这是实际踩过的坑：云端 model_path 被覆盖回 HuggingFace 仓库 id，
+而云端连不上 HF，模型直接加载失败）。
+
+正确做法：把**机器相关**的设置写进 `config.local.yaml`（不入库）：
+
+```yaml
+# /root/autodl-tmp/NovelTTS/config.local.yaml
+generation:
+  model_path: /root/models/Qwen3-TTS-12Hz-1.7B-Base
+  device: cuda
+  batch_size: auto
+```
+
+只写需要覆盖的字段即可，其余自动沿用 `config.yaml`。生效时会打印：
+
+```
+已叠加本机配置 config.local.yaml（覆盖：generation）
+```
+
+优先级：**内置默认 < config.yaml < config.local.yaml < 命令行参数**
+
+> 更新代码时请**排除 config.yaml 与本机配置**，例如：
+> ```bash
+> tar --exclude=config.yaml --exclude=config.local.yaml -xzf 新代码.tar.gz
+> ```
+
 ## 4. 命令速查表
 
 ```bash
