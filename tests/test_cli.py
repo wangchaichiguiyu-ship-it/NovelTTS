@@ -519,3 +519,74 @@ def test_local_config_work_dir_override(workdir: Path) -> None:
         os.chdir(previous)
 
     assert config.project.work_path == target.resolve()
+
+
+def test_command_line_beats_local_config(workdir: Path) -> None:
+    """回归测试：命令行覆盖必须**高于** config.local.yaml。
+
+    起因（实际 bug）：config.local.yaml 里写了 ``audio.speech_rate: 1.0``，
+    于是 ``--rate 1.6`` 完全失效——耗时与产物时长都跟原速一模一样，
+    manifest 里也记成 1.0。而文档承诺优先级是
+    「内置默认 < config.yaml < config.local.yaml < 命令行」。
+
+    根因：本机配置的叠加发生在命令行覆盖**之后**，于是后面的覆盖被前面盖掉。
+    """
+    import os
+
+    (workdir / "config.local.yaml").write_text(
+        "audio:\n  speech_rate: 1.0\n  min_gap_seconds: 0.4\n"
+        "generation:\n  batch_size: 3\n",
+        encoding="utf-8",
+    )
+    previous = Path.cwd()
+    os.chdir(workdir)
+    try:
+        from noveltts.cli import _load_config, build_parser
+
+        # 不带 --rate：本机配置生效
+        args = build_parser().parse_args(["synth", "--chapter", "c003"])
+        plain = _load_config(args)
+        assert plain.audio.speech_rate == 1.0
+        assert plain.audio.min_gap_seconds == 0.4
+        assert plain.generation.batch_size == 3
+
+        # 带 --rate：命令行必须赢
+        args = build_parser().parse_args(["synth", "--chapter", "c003", "--rate", "1.6"])
+        overridden = _load_config(args)
+        assert overridden.audio.speech_rate == 1.6, (
+            "命令行 --rate 被 config.local.yaml 盖掉了"
+        )
+        # 命令行没提到的项仍来自本机配置
+        assert overridden.audio.min_gap_seconds == 0.4
+        assert overridden.generation.batch_size == 3
+
+        # --batch-size / --device 同理
+        args = build_parser().parse_args(
+            ["synth", "--chapter", "c003", "--batch-size", "7", "--device", "cpu"]
+        )
+        cfg = _load_config(args)
+        assert cfg.generation.batch_size == 7
+        assert cfg.generation.device == "cpu"
+        # 没被命令行覆盖的 speech_rate 仍来自本机配置
+        assert cfg.audio.speech_rate == 1.0
+    finally:
+        os.chdir(previous)
+
+
+def test_command_line_rate_validation(workdir: Path) -> None:
+    """--rate 必须为正数。"""
+    import os
+
+    previous = Path.cwd()
+    os.chdir(workdir)
+    try:
+        from noveltts.cli import _load_config, build_parser
+
+        args = build_parser().parse_args(["synth", "--rate", "0"])
+        with pytest.raises(ValueError):
+            _load_config(args)
+        args = build_parser().parse_args(["synth", "--rate", "-1"])
+        with pytest.raises(ValueError):
+            _load_config(args)
+    finally:
+        os.chdir(previous)

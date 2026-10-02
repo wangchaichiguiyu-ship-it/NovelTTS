@@ -327,20 +327,64 @@ def _load_config(args: argparse.Namespace) -> AppConfig:
     if getattr(args, "keep_wav", False):
         overrides.setdefault("encode", {})["keep_wav"] = True
 
-    config = AppConfig.load(config_path, overrides=overrides or None, root=root)
+    # --- 先叠文件，最后才应用命令行覆盖 ---
+    #
+    # 顺序很关键：命令行必须**最后**应用，否则会被 config.local.yaml 里的
+    # 同名项盖掉。这是实际踩过的 bug：config.local.yaml 里写了
+    # `audio.speech_rate: 1.0`，于是 `--rate 1.6` 完全失效（manifests 里
+    # 也记成 1.0），而文档却承诺「命令行优先级最高」。
+    config = AppConfig.load(config_path, root=root)
     if local_config is not None:
-        # 本机覆盖：以「config.local.yaml 优先」的方式再叠一层
-        local = AppConfig.load(
-            local_config,
-            overrides=overrides or None,
-            root=root,
-        )
+        local = AppConfig.load(local_config, root=root)
         config = _overlay_config(config, local, local_config)
+
+    if overrides:
+        config = _apply_overrides(config, overrides)
+
     config.project.ensure_dirs()
     logger.debug("配置来源：%s", config.config_path or "（内置默认值）")
     if local_config is not None:
         logger.debug("已叠加本机覆盖：%s", local_config)
     return config
+
+
+def _apply_overrides(config: AppConfig, overrides: dict[str, Any]) -> AppConfig:
+    """把命令行覆盖应用到已合并的配置上（**最高优先级**）。
+
+    Args:
+        config: 已合并 config.yaml 与 config.local.yaml 的配置。
+        overrides: 形如 ``{"generation": {"device": "cuda"}}`` 的深层覆盖。
+
+    Returns:
+        新配置；未涉及 ``project`` 段时不会重建目录。
+
+    Note:
+        ``project`` 段被覆盖时要重新 :meth:`ProjectConfig.resolve`，
+        否则 output_path 等派生属性仍是旧值。
+    """
+    from dataclasses import asdict, fields, replace
+
+    merged: dict[str, Any] = {}
+    for section in fields(AppConfig):
+        name = section.name
+        if name == "config_path" or name not in overrides:
+            continue
+        provided = overrides[name]
+        if not isinstance(provided, dict):
+            continue
+        current = asdict(getattr(config, name))
+        filtered = {k: v for k, v in provided.items() if k in current}
+        if filtered:
+            merged[name] = replace(getattr(config, name), **filtered)
+
+    if not merged:
+        return config
+
+    result = replace(config, **merged)
+    if "project" in merged:
+        result.project.resolve(result.project.root_path)
+    result.config_path = config.config_path
+    return result
 
 
 def _overlay_config(base: AppConfig, local: AppConfig, local_path: Path) -> AppConfig:
