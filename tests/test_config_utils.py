@@ -294,10 +294,69 @@ def test_shipped_config_yaml_is_loadable(project_root: Path) -> None:
 
 
 def test_shipped_config_paths_are_sane(project_root: Path) -> None:
+    """仓库自带的 config.yaml 必须能加载，且它引用的资源要存在。
+
+    关于 ``model_path``（这个断言被云端与本地两种环境反复打磨过）：
+
+    * 它**允许**是 HuggingFace 仓库 id（含 ``/``，如
+      ``Qwen/Qwen3-TTS-12Hz-1.7B-Base``），由 qwen_tts 运行时下载；
+    * 也允许是仓库内的相对目录（本机开发把模型放进项目里）；
+    * **若本机存在 ``config.local.yaml``**，则 config.yaml 里的默认值
+      根本不参与运行（会被覆盖），此时不该对它提任何要求——
+      真正生效的路径由 ``test_effective_model_path_resolves`` 守。
+
+    也就是说：只有当「本机没有覆盖配置」时，才要求默认值可用。
+    """
     config = AppConfig.load(project_root / "config.yaml")
     assert config.project.root_path == project_root.resolve()
     assert (config.project.root_path / config.voice.ref_audio).is_file(), "参考音频不存在"
-    assert (config.project.root_path / config.generation.model_path).is_dir(), "本地模型目录不存在"
+
+    model_path = config.generation.model_path
+    assert model_path, "config.yaml 必须给出 model_path"
+
+    # 有本机覆盖时，默认值不参与运行，不做要求
+    if (project_root / "config.local.yaml").is_file():
+        return
+
+    candidates = [Path(model_path).expanduser(), config.project.root_path / model_path]
+    if any(candidate.is_dir() for candidate in candidates):
+        return  # 本地存在，OK
+
+    looks_like_repo_id = (
+        "/" in model_path
+        and not Path(model_path).is_absolute()
+        and not model_path.startswith((".", "~"))
+        and not model_path.endswith("/")
+    )
+    assert looks_like_repo_id, (
+        f"model_path 既不是存在的本地目录，也不是合法的仓库 id：{model_path!r}。"
+        "若模型在别处，请写进 config.local.yaml"
+    )
+
+
+def test_effective_model_path_resolves(project_root: Path) -> None:
+    """若存在 config.local.yaml，它给出的模型路径必须真实存在。
+
+    这条才是「部署后配置没被冲掉」的守门人：它检查**最终生效**的路径，
+    而不是 config.yaml 里的默认值。
+    """
+    local = project_root / "config.local.yaml"
+    if not local.is_file():
+        pytest.skip("本机没有 config.local.yaml（用默认配置即可）")
+
+    model_path = None
+    for line in local.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("model_path:"):
+            model_path = stripped.split(":", 1)[1].strip().strip("'\"")
+            break
+
+    if not model_path:
+        pytest.skip("config.local.yaml 没有覆盖 model_path")
+
+    assert Path(model_path).expanduser().is_dir(), (
+        f"config.local.yaml 指定的模型目录不存在：{model_path}"
+    )
 
 
 # --------------------------------------------------------------------------- #
