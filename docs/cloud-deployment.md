@@ -261,7 +261,7 @@ noveltts --version
 # ② 参考音频在位
 ls -lh assets/ref/doubao.wav
 
-# ③ 测试全绿（440 个用例，不需要 GPU、不加载模型）
+# ③ 测试全绿（457 个用例，不需要 GPU、不加载模型）
 python run_tests.py | tail -3
 ```
 

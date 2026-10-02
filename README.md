@@ -3,15 +3,25 @@
 把 EPUB / TXT 小说转成有声书：**洗稿**（修正模型念不对的缩写与数字）→ **语意切分** →
 **Qwen3-TTS 声音克隆**逐段合成 → **流式拼接**成章 → **压缩**成 m4a。
 
-> 📘 **想直接上手操作？**
-> - **[docs/user-guide.md](docs/user-guide.md)** —— 命令命名规范、逐步操作、产物说明、故障排查
-> - **[docs/cloud-deployment.md](docs/cloud-deployment.md)** —— 云端（AutoDL / NVIDIA）从零部署与验证
+> ### 📘 文档导航
 >
-> 本文档偏重设计与原理。
+> | 我想… | 看这里 |
+> |---|---|
+> | **完整走一遍**：从导入电子书到拿到成品 | **[docs/overview.md](docs/overview.md)** ← 交付总纲，含复现检查清单 |
+> | **开发可视化界面** / 查接口与参数 | **[docs/API-REFERENCE.md](docs/API-REFERENCE.md)** ← 全部接口规范 |
+> | 在自己电脑上操作 | [docs/user-guide.md](docs/user-guide.md) |
+> | 上云端 GPU 跑 | [docs/cloud-deployment.md](docs/cloud-deployment.md) |
+> | 参与开发 / 版本管理 | [docs/git-workflow.md](docs/git-workflow.md) |
+>
+> 本文档偏重**设计与原理**。
+
+**已实测跑通的成果**：一本 19 万字的轻小说 → **4 小时 29 分有声书**，
+3220 个片段，**零失败**，RTX 3090 上耗时 **1 小时 36 分**（RTF 0.37）。
 
 针对 **16 GB 统一内存的 Mac** 设计，也适用于云端 NVIDIA GPU（30 系及以上）。
 
-支持**语速调节**（变速不变调）、**CUDA 自适应加速**（批大小/FlashAttention/TF32 按实测显存自动决定）。
+支持**语速调节**（变速不变调）、**CUDA 自适应加速**（批大小/FlashAttention/TF32 按实测显存自动决定）、
+**断点续跑**（任何时刻中断，损失只有当前那一段）。
 
 ```text
 EPUB/TXT ──parse──▶ 章节 ──normalize──▶ 洗稿文本 ──segment──▶ 片段
@@ -478,7 +488,7 @@ pip install pytest
 pytest tests/ -q
 ```
 
-**451 个用例，全部通过，且全部不加载模型。** 涉及推理的用例统一用
+**457 个用例，全部通过，且全部不加载模型。** 涉及推理的用例统一用
 `FakeSynthesisEngine` 注入——它产出正弦波，但会让整条流水线（含磁盘布局、
 manifest、断点续跑、失败隔离）真实地跑一遍。
 
@@ -491,10 +501,10 @@ manifest、断点续跑、失败隔离）真实地跑一遍。
 | `test_segmenter.py` | 50 | 句级切分边界、聚合、跨段合并 |
 | `test_audio.py` | 55 | 响度归一、静音裁切、流式拼接、压缩命令、**变速不变调** |
 | `test_parser.py` | 42 | EPUB/TXT 切章、标题去重、样板文字过滤 |
-| `test_cli.py` | 46 | 全部子命令 + dry-run 全链路 + **本机配置覆盖** |
+| `test_cli.py` | 50 | 全部子命令 + dry-run 全链路 + **本机配置覆盖** |
 | `test_config_utils.py` | 45 | 配置嵌套构造、内置 YAML 解析器、numba 缓存兜底 |
 | `test_engine_contract.py` | 29 | **对 qwen_tts 的调用契约**（见下） |
-| `test_pipeline.py` | 51 | 合成会话、断点续跑、失败隔离、**批处理**、语速 |
+| `test_pipeline.py` | 53 | 合成会话、断点续跑、失败隔离、**批处理**、语速 |
 
 ### 引擎契约测试：把最贵的失败提前到本机
 
