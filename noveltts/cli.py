@@ -393,6 +393,14 @@ def _overlay_config(base: AppConfig, local: AppConfig, local_path: Path) -> AppC
         "、".join(sorted(merged_sections)),
     )
     result = replace(base, **merged_sections)
+
+    # 关键：project 段的 *_dir 被覆盖后必须**重新解析**一次。
+    # 否则 project.output_path 等派生属性仍是旧值（它们在 AppConfig.load 里
+    # 算好并缓存了）。这是本功能刚写时的实际 bug：改了 output_dir，
+    # 但 noveltts info 仍显示老路径，产物照样写回系统盘。
+    if "project" in merged_sections:
+        result.project.resolve(result.project.root_path)
+
     result.config_path = base.config_path
     return result
 

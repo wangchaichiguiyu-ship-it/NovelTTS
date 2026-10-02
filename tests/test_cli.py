@@ -467,3 +467,55 @@ def test_local_config_unknown_key_warns_but_works(
     finally:
         os.chdir(previous)
     assert config.generation.batch_size == 5
+
+
+def test_local_config_project_dirs_are_re_resolved(workdir: Path) -> None:
+    """回归测试：本机覆盖 project 段后，派生的 *_path 必须重新解析。
+
+    起因（实际 bug）：config.local.yaml 里改了 output_dir 指向数据盘，
+    但 project.output_path 是 AppConfig.load 时算好并缓存的，只换
+    output_dir 字段不会更新它——于是 info 仍显示老路径、产物依然写回系统盘。
+    """
+    import os
+
+    target = workdir / "data-disk" / "audio"
+    (workdir / "config.local.yaml").write_text(
+        f"project:\n  output_dir: {target}\n", encoding="utf-8"
+    )
+    previous = Path.cwd()
+    os.chdir(workdir)
+    try:
+        from noveltts.cli import _load_config, build_parser
+
+        args = build_parser().parse_args(["info"])
+        config = _load_config(args)
+    finally:
+        os.chdir(previous)
+
+    assert config.project.output_dir == str(target)
+    # 派生属性必须跟着变，而不是停留在 project.root/output/audio
+    assert config.project.output_path == target.resolve()
+    assert config.project.output_path != (workdir / "output" / "audio").resolve()
+    # 目录应已被创建
+    assert config.project.output_path.is_dir()
+
+
+def test_local_config_work_dir_override(workdir: Path) -> None:
+    """work_dir 同样要重新解析（云端把中间产物也放数据盘）。"""
+    import os
+
+    target = workdir / "data-disk" / "work"
+    (workdir / "config.local.yaml").write_text(
+        f"project:\n  work_dir: {target}\n", encoding="utf-8"
+    )
+    previous = Path.cwd()
+    os.chdir(workdir)
+    try:
+        from noveltts.cli import _load_config, build_parser
+
+        args = build_parser().parse_args(["info"])
+        config = _load_config(args)
+    finally:
+        os.chdir(previous)
+
+    assert config.project.work_path == target.resolve()
