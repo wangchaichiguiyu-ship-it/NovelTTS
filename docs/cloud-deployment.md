@@ -482,7 +482,126 @@ EOF
 
 把某个 wav 下载到本地听（VSCode 里右键 → Download），确认音色与语速。
 
-### 5.3 跑全书
+### 5.3 跑全书（关键：怎么保证 SSH 断了任务不死）
+
+书跑完要 2 小时左右。**绝不能**直接在前台跑 `noveltts run` ——
+SSH 一断，终端收到 SIGHUP，进程就被杀，白跑。
+
+#### 正确做法：用 `setsid` 脱离会话
+
+```bash
+cd /root/autodl-tmp/NovelTTS
+
+setsid nohup /root/miniconda3/bin/noveltts run > run_full.log 2>&1 < /dev/null &
+```
+
+三个部分各自的作用：
+
+| 部分 | 作用 | 少了它会怎样 |
+|---|---|---|
+| `setsid` | 新建**独立会话**，与 SSH 的会话脱钩 | SSH 断开时进程收到 SIGHUP 被杀 |
+| `nohup` | 忽略 SIGHUP 信号 | 同上（双保险） |
+| `> run_full.log 2>&1` | 日志写文件 | 日志丢进已关闭的终端，无法查看 |
+| `< /dev/null` | 切断 stdin | 进程可能因读到 EOF 而异常退出 |
+| `&` | 放后台 | 占用你的终端 |
+
+**验证它真的脱离了**（关键一步）：
+
+```bash
+# 进程的 SID 应当等于自己的 PID，而不是 SSH 会话的 SID
+ps -eo pid,sid,etime,cmd | grep "[n]oveltts run"
+```
+
+输出里 `PID` 与 `SID` **相同**就说明它已是独立会话，SSH 断开不影响。
+
+#### 用 screen 也可以（交互式更方便）
+
+```bash
+screen -S tts                      # 新建会话
+noveltts run                       # 在里面正常前台跑
+# 按 Ctrl-A 然后 D 脱离；SSH 断了也没事
+screen -r tts                      # 重新连上查看
+```
+
+适合你想随时进去看滚动的日志。`setsid` 方式更适合纯后台跑批。
+
+#### 监控进度
+
+```bash
+tail -f run_full.log               # 实时看（Ctrl-C 只退出查看，不影响任务）
+
+# 只看关键行
+tail -f run_full.log | grep -E "完成 |开始合成|失败"
+
+# 已生成多少片段
+find /root/autodl-tmp/NovelTTS-output/audio/segments -name "*.wav" | wc -l
+
+# 进程是否还活着
+ps -eo pid,etime,cmd | grep "[n]oveltts run"
+```
+
+#### 断线后如何确认任务没受影响
+
+```bash
+ssh autodl
+ps -eo pid,etime,cmd | grep "[n]oveltts run"     # 还活着？
+tail -5 /root/autodl-tmp/NovelTTS/run_full.log   # 进度到哪了？
+```
+
+**万一真的被杀掉了**：直接重跑同一条命令即可，已生成的片段会自动跳过
+（日志里显示 `跳过 N`），不会重复烧算力。
+
+> 本项目的**断点续跑**就是为这种情况设计的：每段生成完立刻落盘，
+> 所以任何时刻中断，损失都只有当时正在生成的那一段。
+
+### 5.4 拼接与压缩（生成完成后）
+
+`noveltts run` **会自动**给每一章拼接 + 压缩，产出 `c001.wav / c001.m4a …`。
+若还要把各章合成**一个整本文件**，再跑一次：
+
+```bash
+cd /root/autodl-tmp/NovelTTS
+source /root/miniconda3/etc/profile.d/conda.sh && conda activate base
+
+# 把各章 wav 顺序合并成整本（流式，不会爆内存）
+noveltts concat --merge-book --book-name "Too Many Losing Heroines Vol 8"
+
+# 压缩整本（约 1/8 体积）
+noveltts encode
+```
+
+产物清单：
+
+```text
+/root/autodl-tmp/NovelTTS-output/audio/
+├── segments/c001/…c010/         逐段音频（断点续跑的基石，确认无误后可删）
+├── c001.wav … c010.wav          各章无损母版
+├── c001.m4a … c010.m4a          各章压缩版（手机可直接放）
+├── Too Many Losing Heroines Vol 8.wav    整本无损
+└── Too Many Losing Heroines Vol 8.m4a    整本压缩
+```
+
+体积参考：整本 3.82 小时音频，无损 wav 约 660 MB，m4a 约 80 MB。
+
+#### 下载到本地听
+
+```bash
+# 在**本地 Mac** 上执行（不是远程）
+scp autodl:"/root/autodl-tmp/NovelTTS-output/audio/Too\ Many\ Losing\ Heroines\ Vol\ 8.m4a" ~/Downloads/
+```
+
+或者直接在 VSCode 远程窗口里右键文件 → Download。
+
+#### 跑完后的空间回收
+
+```bash
+du -sh /root/autodl-tmp/NovelTTS-output/*
+
+# 确认成品无误后，删掉逐段音频（占大头，且可用 run 重新生成）
+rm -rf /root/autodl-tmp/NovelTTS-output/audio/segments
+```
+
+### 5.5 一句话总结：安全的跑书流程
 
 ```bash
 # 用 nohup 防止 SSH 断开导致中断
