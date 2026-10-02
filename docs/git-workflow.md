@@ -305,17 +305,67 @@ git commit -m "chore: 移除误提交的大文件"
 
 ---
 
-## 8. 本仓库的分支与标签现状
+## 8. 本仓库的开发历史
+
+功能分支开发完就合并并删除，所以 `git branch` 平时只会看到 `main`。
+**历史记录在 log 里**——用下面这条命令看得最清楚：
 
 ```bash
-git branch -vv                       # 本地分支
-git branch -a                        # 含远端分支
+git log --oneline --graph --decorate
+```
+
+输出形如（`|\` 与 `|/` 之间就是那条功能分支）：
+
+```
+*   d25a354 merge: NVIDIA/CUDA 自适应加速与语速调节
+|\
+| * b9e7cdf feat(accel): 新增 NVIDIA/CUDA 自适应加速与语速调节
+|/
+*   17a406d merge: 文档布局重构
+|\
+| * 07e3afc chore(docs): 重构文档布局，抽出云端部署与 git 规范
+|/
+* 98eebe8 chore: 初始化仓库，纳入完整可运行版本
+```
+
+其他常用查看方式：
+
+```bash
+git branch -vv                       # 本地分支（含各自指向的提交）
 git tag -n                           # 标签及说明
-git log --oneline --graph --all      # 全局视图
+git log --oneline --all --graph      # 含所有分支
+git log --merges --oneline           # 只看合并提交（= 每个已完成的"功能"）
 ```
 
-各功能的开发分支与合并记录，用下面这条命令看最清楚：
+---
+
+## 9. 每次做完功能的固定动作（本仓库约定）
 
 ```bash
-git log --oneline --graph --all --decorate
+# ① 开分支
+git checkout -b feature/xxx
+
+# ② 写代码
+
+# ③ 跑全部测试（硬性要求：必须全绿）
+python run_tests.py
+
+# ④ 提交（信息写清"为什么"）
+git add -A
+git commit -F - <<'MSG'
+feat(范围): 简短描述
+
+为什么这么改。
+MSG
+
+# ⑤ 合并回 main 并删分支
+git checkout main
+git merge --no-ff feature/xxx -m "merge: xxx"
+git branch -d feature/xxx
+
+# ⑥ 里程碑打标签
+git tag -a v1.1.0 -m "说明"
 ```
+
+**测试不通过就不提交**——这是本仓库唯一的硬性纪律。
+好处是 `main` 上的任意一个提交都是可运行的，随时能回退。

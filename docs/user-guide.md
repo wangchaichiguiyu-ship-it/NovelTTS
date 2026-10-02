@@ -302,11 +302,47 @@ afplay output/audio/segments/c003/c003-0002.wav
 | 症状 | 调整 |
 |---|---|
 | 不像参考音色 | 检查 `voice.ref_text` 是否与 `doubao.wav` 内容**逐字一致** |
-| 语速太快/太慢 | 换一个语速合适的参考音频，或在 `ref_text` 前面加描述 |
+| 语速太快/太慢 | **用 `--rate`**（见下方「调节语速」）；或换一个语速合适的参考音频 |
 | 语气太平 | 试 `generation.temperature: 0.8`（默认跟随模型配置） |
 | 某些词念错 | 用 `text_rules.custom_replacements` 改写那个词 |
 
-### 2.6 第 6 步：生成整章
+### 2.6 调节语速（变速不变调）
+
+最常用的手段是 `--rate`，**不需要改配置文件**：
+
+```bash
+noveltts synth --chapter c003 --limit 5 --rate 1.2    # 快 20%
+noveltts synth --chapter c003 --limit 5 --rate 0.85   # 慢 15%
+noveltts run --rate 1.15                              # 全书都快 15%
+```
+
+| `--rate` | 效果 |
+|---|---|
+| `1.0` | 原速（默认） |
+| `1.15` | 略快，最自然 |
+| `1.25` | 明显快，通勤听刚好 |
+| `0.85` | 放慢，适合难懂的内容 |
+| `1.5` | 很快，开始有轻微金属感 |
+
+实现方式是**相位声码器**（librosa），**音高保持不变**——不是简单加快采样率，
+所以不会变成"快进的唐老鸭"。建议范围 `0.5~2.0`，微调（0.9~1.15）最自然。
+
+想固定下来就写进 `config.yaml`：
+
+```yaml
+audio:
+  speech_rate: 1.15
+```
+
+语速会记录在 `manifest.json` 的 `settings.speech_rate` 里，半年后也知道这版是怎么生成的。
+
+> **改了语速要重新生成吗？** 要。语速是在生成后对音频做的处理，
+> 已存在的片段会被跳过。所以调语速时请配合 `--force`：
+> ```bash
+> noveltts synth --chapter c003 --limit 5 --rate 1.2 --force
+> ```
+
+### 2.7 第 6 步：生成整章
 
 ```bash
 noveltts synth --chapter c003
@@ -320,7 +356,7 @@ noveltts synth --chapter c003
 完成 c003 Intermission: Appeal to Emotion | 新生成 39 | 跳过 5 | 音频 03:00 | 耗时 06:40 | RTF 2.22
 ```
 
-### 2.7 第 7 步：拼接 + 压缩
+### 2.8 第 7 步：拼接 + 压缩
 
 ```bash
 noveltts concat --chapter c003      # 片段 → 章节 wav
@@ -334,7 +370,7 @@ output/audio/c003.wav      ← 无损母版（约 48 KB/秒，3 分钟的章节�
 output/audio/c003.m4a      ← 压缩成品（约 1/8 体积，手机直接能放）
 ```
 
-### 2.8 或者：一条命令搞定第 4~7 步
+### 2.9 或者：一条命令搞定第 4~7 步
 
 ```bash
 noveltts run --chapter c003
@@ -348,7 +384,7 @@ noveltts run --chapter c003
 [压缩] c003.m4a | 8.5 MB -> 1.1 MB（13%，省 7.4 MB） | 耗时 3.1s
 ```
 
-### 2.9 做完整本书
+### 2.10 做完整本书
 
 ```bash
 noveltts run                                  # 全书所有章节
@@ -408,7 +444,9 @@ cd /Users/wanghaoxin/Documents/AustinProject/NovelTTS
 --force              # 已存在的片段也重新生成（续跑时不要加）
 --dry-run            # 用假引擎跑通链路，不加载模型，产出正弦波
 --language Chinese   # 覆盖语言（默认 English）
---device cpu         # 覆盖设备
+--device cuda        # 覆盖设备：auto/cuda/mps/cpu
+--rate 1.2           # 语速倍率（变速不变调），1.0 原速
+--batch-size auto    # 批大小：auto 按显存自推，或写数字
 -v / -q              # 更详细 / 更安静的日志
 ```
 
@@ -489,13 +527,45 @@ echo 'alias noveltts="conda run -n qwen3-tts noveltts"' >> ~/.zshrc
 export NUMBA_CACHE_DIR=/tmp/numba_cache
 ```
 
-### 6.3 `RuntimeError: 引擎已关闭` 或显存不足（OOM）
+### 6.3 想确认硬件加速有没有生效
+
+每次 `synth` / `run` 在**加载模型之前**都会打印一段「硬件与加速方案」：
+
+```
+硬件与加速方案：
+设备：cuda:NVIDIA GeForce RTX 3090 | 显存 24.0G（可用 23.8G） | 算力 sm_86 | torch 2.4.0 | cuda 12.4
+配置：device=cuda:0 dtype=bfloat16 attn=flash_attention_2 batch_size=8
+开关：tf32=True cudnn_benchmark=True empty_cache=True clear_every=50
+判定依据：
+  - 批大小 auto -> 8：...
+  - 注意力 auto -> flash_attention_2（可用（flash-attn 2.7.0））
+  ...
+```
+
+要点：
+
+* `attn=sdpa` 而不是 `flash_attention_2` -> flash-attn 没装或版本不匹配（不影响使用，只是慢）
+* `batch_size=1` 但显存很大 -> 配置里把 `batch_size` 写死成 1 了，改成 `auto`
+* `tf32=False` 但卡是 30 系以上 -> 检查 `compute_capability` 是否 >= 8.0
+
+所有开关都在 `config.yaml` 的 `generation` 段，写 `auto` 让程序判断：
+
+```yaml
+generation:
+  batch_size: auto          # 按显存自推（8G→1, 24G→6, 32G→9）
+  attn_implementation: auto # CUDA 且装了 flash-attn 就用
+  tf32: auto                # 算力 >= 8.0 时开启
+  cudnn_benchmark: auto
+  clear_cache_every: 0      # 0 = auto（CUDA/MPS 每 50 段清理一次）
+```
+
+### 6.4 `RuntimeError: 引擎已关闭` 或显存不足（OOM）
 
 * 把 `config.yaml` 的 `generation.batch_size` 改回 `1`
 * 把 `max_new_tokens` 从 1024 降到 512
 * 云端确认 `flash-attn` 装上了（能省不少显存）
 
-### 6.4 生成的音频有的段特别长 / 有怪声
+### 6.5 生成的音频有的段特别长 / 有怪声
 
 单段失败或退化会记在 `manifest.json` 的 `error` 字段。定位并重做：
 
@@ -509,11 +579,11 @@ for r in m['records']:
 noveltts synth --chapter c003 --segments 42 --force    # 只重做那一段
 ```
 
-### 6.5 断点了 / SSH 断了
+### 6.6 断点了 / SSH 断了
 
 **直接重跑同一条命令**，已生成的片段自动跳过。看到 `跳过 N` 就是正常续跑。
 
-### 6.6 想从头再来
+### 6.7 想从头再来
 
 ```bash
 rm -rf output              # 删掉全部中间产物与音频

@@ -9,7 +9,9 @@
 >
 > 本文档偏重设计与原理。
 
-针对 **16 GB 统一内存的 Mac** 设计，也适用于云端 GPU 机器。
+针对 **16 GB 统一内存的 Mac** 设计，也适用于云端 NVIDIA GPU（30 系及以上）。
+
+支持**语速调节**（变速不变调）、**CUDA 自适应加速**（批大小/FlashAttention/TF32 按实测显存自动决定）。
 
 ```text
 EPUB/TXT ──parse──▶ 章节 ──normalize──▶ 洗稿文本 ──segment──▶ 片段
@@ -87,6 +89,7 @@ NovelTTS/
 │   ├── normalize.py              # 洗稿（缩写、数字、符号）
 │   ├── segmenter.py              # 语意切分
 │   ├── engine.py                 # Qwen3-TTS 封装（唯一 import torch 的地方）
+│   ├── accelerator.py            # 硬件探测与加速方案（CUDA/MPS/CPU 自适应）
 │   ├── synthesis.py              # 合成编排：逐段落盘、断点续跑、失败隔离
 │   ├── audio_io.py               # 音频读写、响度归一、静音裁切
 │   ├── concat.py                 # 流式拼接
@@ -128,7 +131,8 @@ NovelTTS/
 
 ```bash
 --device auto|cuda|mps|cpu     # 覆盖设备
---batch-size 1                 # 批大小（16G 内存请保持 1）
+--batch-size auto              # auto 按显存自推，或写数字（Mac 16G 请写 1）
+--rate 1.2                     # 语速倍率（变速不变调），1.0 原速
 --language English|Chinese|... # 覆盖语言
 --force                        # 已生成的片段也重新生成
 --dry-run                      # 用假引擎跑通链路，不加载模型
@@ -289,7 +293,83 @@ noveltts segment --chapter c002 --preview 20
 
 ---
 
-## 7. 16 GB 内存友好的设计
+## 7. 硬件加速（CUDA / MPS / CPU 自适应）
+
+同一份代码要跑在三种差别很大的环境上，所以把「硬件能力 → 优化开关」的判断
+集中在 `noveltts/accelerator.py`，并**全部实测**，不做任何假设。
+
+```yaml
+generation:
+  device: auto              # cuda > mps > cpu
+  batch_size: auto          # 按显存推导
+  attn_implementation: auto # CUDA 且装了 flash-attn 就用
+  tf32: auto                # 算力 >= 8.0 时开启
+  cudnn_benchmark: auto
+  clear_cache_every: 0      # 0 = auto（CUDA/MPS 每 50 段）
+  oom_batch_downgrade: true # OOM 时自动减半批大小
+```
+
+每次开跑前会打印判定依据，一眼看清有没有生效：
+
+```
+硬件与加速方案：
+设备：cuda:NVIDIA GeForce RTX 3090 | 显存 24.0G（可用 23.8G） | 算力 sm_86 | torch 2.4.0 | cuda 12.4
+配置：device=cuda:0 dtype=bfloat16 attn=flash_attention_2 batch_size=8
+开关：tf32=True cudnn_benchmark=True empty_cache=True clear_every=50
+判定依据：
+  - 批大小 auto -> 8：总显存 24.0G × 0.8 与可用 23.8G 取小 = 19.2G；...
+  - 注意力 auto -> flash_attention_2（可用（flash-attn 2.7.0））
+  - TF32 auto -> 开启（CUDA，sm_86）
+```
+
+### 批大小怎么推出来的
+
+固定占用 4.5 GB（bf16 权重 + 说话人编码器 + 运行时），每多一个批内样本约 2.5 GB，
+再乘 0.8 的安全系数，并且取「总显存」与「**可用**显存」的较小值——
+后者很重要：实例上可能已有别的进程占着卡，只看总显存会乐观到 OOM。
+
+| 显存 | 推荐批大小 |
+|---|---|
+| 8 G | 1 |
+| 12 G | 3 |
+| 16 G | 4 |
+| 24 G | 6 |
+| 32 G | 9 |
+| 48 G | 14 |
+| 80 G+ | 16（上限） |
+
+**Mac 用户注意**：统一内存架构下显存与内存是同一块物理内存，批处理只会更危险，
+所以 `auto` 在非 CUDA 设备上一律返回 1。
+
+### 三个容易踩的坑（都已处理）
+
+1. **配置写了 `flash_attention_2` 但没装** —— 会在**加载 3.4 GB 权重之前**探测并
+   降级到 `sdpa`，而不是等加载完再崩。
+2. **老卡上开 TF32** —— TF32 需要算力 ≥ 8.0（Ampere/30 系起），更老的卡上显式关闭。
+3. **OOM 后整章反复失败** —— 自动把批大小减半并继续，不会一个过大的批次拖垮整章。
+
+## 8. 语速调节（变速不变调）
+
+```bash
+noveltts synth --chapter c003 --limit 5 --rate 1.2   # 快 20%
+noveltts run --rate 1.15                             # 全书都快 15%
+```
+
+```yaml
+audio:
+  speech_rate: 1.15    # 1.0 原速，1.2 快 20%，0.85 慢 15%
+```
+
+用**相位声码器**（librosa）实现，**音高保持不变**——不是简单加快采样率，
+所以不会变成"快进的唐老鸭"。测试里直接断言了 220 Hz 主频在 0.8/1.25/1.5
+三档速率下都不动。
+
+* 建议范围 `0.5 ~ 2.0`，微调（`0.9 ~ 1.15`）最自然
+* librosa 已是 `qwen_tts` 的依赖，**不引入新依赖**
+* 缺 librosa 时安全退回原速并警告，不会让整段音频报废
+* 语速写进 `manifest.settings.speech_rate`，保证音频可复现
+
+## 9. 16 GB 内存友好的设计
 
 这是本项目最花心思的部分。**内存峰值的决定因素不是音频总长，而是同时持有多少东西。**
 
@@ -314,7 +394,10 @@ noveltts segment --chapter c002 --preview 20
 
 ---
 
-## 8. 云端部署
+## 10. 云端部署
+
+> 完整步骤（AutoDL 选实例、VSCode Remote SSH、三层验证清单、成本估算）
+> 见 **[docs/cloud-deployment.md](docs/cloud-deployment.md)**。以下是要点。
 
 ```bash
 # 1) 拉代码 + 装依赖
@@ -331,16 +414,17 @@ pip install -U flash-attn --no-build-isolation
 
 ```yaml
 generation:
-  device: cuda              # 或 auto
-  attn_implementation: auto # CUDA 上会自动选 flash_attention_2
-  batch_size: 4             # 显存 ≥24GB 可以调大
+  device: cuda              # 或保持 auto，程序会自己选到 cuda
+  batch_size: auto          # 按显存自推：24G→6, 32G→9（也可写死数字）
+  attn_implementation: auto # CUDA 且装了 flash-attn 就用它
+  tf32: auto                # 30 系（sm_86）自动开启
 ```
 
 其余命令完全一致。**建议先在云端跑 `--dry-run` 验证链路**，再正式开跑。
 
 ---
 
-## 9. 参考音频与音色克隆
+## 11. 参考音频与音色克隆
 
 模型是 `Qwen3-TTS-12Hz-1.7B-Base`（**声音克隆**），必须提供参考音频：
 
@@ -361,7 +445,7 @@ voice:
 
 ---
 
-## 10. 测试
+## 12. 测试
 
 ### 零依赖运行（不需要 pytest）
 
@@ -378,7 +462,7 @@ pip install pytest
 pytest tests/ -q
 ```
 
-**372 个用例，全部通过，且全部不加载模型。** 涉及推理的用例统一用
+**440 个用例，全部通过，且全部不加载模型。** 涉及推理的用例统一用
 `FakeSynthesisEngine` 注入——它产出正弦波，但会让整条流水线（含磁盘布局、
 manifest、断点续跑、失败隔离）真实地跑一遍。
 
@@ -387,13 +471,14 @@ manifest、断点续跑、失败隔离）真实地跑一遍。
 | 文件 | 用例 | 覆盖内容 |
 |---|---|---|
 | `test_normalize.py` | 80 | 洗稿规则逐条 |
+| `test_accelerator.py` | 53 | **CUDA 分支**：批大小/注意力/TF32/缓存/OOM |
 | `test_segmenter.py` | 50 | 句级切分边界、聚合、跨段合并 |
-| `test_audio.py` | 48 | 响度归一、静音裁切、流式拼接、压缩命令 |
+| `test_audio.py` | 55 | 响度归一、静音裁切、流式拼接、压缩命令、**变速不变调** |
 | `test_parser.py` | 42 | EPUB/TXT 切章、标题去重、样板文字过滤 |
 | `test_cli.py` | 41 | 全部子命令 + dry-run 全链路 |
 | `test_config_utils.py` | 45 | 配置嵌套构造、内置 YAML 解析器、numba 缓存兜底 |
 | `test_engine_contract.py` | 29 | **对 qwen_tts 的调用契约**（见下） |
-| `test_pipeline.py` | 37 | 合成会话、断点续跑、失败隔离、批大小 |
+| `test_pipeline.py` | 45 | 合成会话、断点续跑、失败隔离、批大小、语速 |
 
 ### 引擎契约测试：把最贵的失败提前到本机
 
@@ -416,7 +501,7 @@ manifest、断点续跑、失败隔离）真实地跑一遍。
 
 ---
 
-## 11. 常见问题
+## 13. 常见问题
 
 **Q：`info` 报"音频读写不可用 - 缺少依赖"**
 A：`pip install numpy soundfile`。
@@ -464,7 +549,7 @@ A：`noveltts synth --chapter c002 --segments 42 --force`，
 
 ---
 
-## 12. 产物清单
+## 14. 产物清单
 
 ```text
 output/
@@ -485,7 +570,7 @@ output/
 
 ---
 
-## 13. 许可与致谢
+## 15. 许可与致谢
 
 * TTS 模型：[Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS)（Apache-2.0）
 * 本项目代码：MIT
