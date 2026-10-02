@@ -654,3 +654,161 @@ def test_oom_downgrade_can_be_disabled(config: AppConfig) -> None:
     config.generation.oom_batch_downgrade = False
     with SynthesisSession(config, engine=FakeSynthesisEngine()) as session:
         assert session._maybe_shrink_batch(8, "CUDA out of memory") == 8
+
+
+# --------------------------------------------------------------------------- #
+# 真正的批处理（本次性能修复的核心）
+# --------------------------------------------------------------------------- #
+
+
+def test_engine_is_called_with_multiple_texts(config: AppConfig) -> None:
+    """回归测试：批处理必须把多段文本放进**同一次**引擎调用。
+
+    这是性能问题的根子——修复前每段都单独调一次 `synthesize([text])`，
+    RTX 3090 上 RTF 只有 1.74；改成真批量后同一批 5 段 RTF 降到 0.53。
+    """
+    parts = [f"Sentence number {i} is here for the batch test." for i in range(1, 13)]
+    items = TextSegmenter(config.segment, language="en").segment_text(
+        " ".join(parts), chapter_id="bt", normalize=False
+    )
+    assert len(items) >= 4
+
+    engine = FakeSynthesisEngine()
+    with SynthesisSession(config, engine=engine) as session:
+        session.synthesize_segments(items, chapter_id="bt", title="Batch", batch_size=4)
+
+    # 每次调用的入参长度就是「实际批大小」
+    sizes = [len(call) for call in engine.calls]
+    assert sizes, "引擎根本没被调用"
+    assert max(sizes) > 1, f"没有任何一次调用包含多段文本：{sizes}"
+    assert max(sizes) <= 4, f"批大小超过配置上限：{sizes}"
+    # 所有片段都被覆盖，且没有重复
+    total = sum(sizes)
+    assert total == len(items), f"生成的段数 {total} 与片段总数 {len(items)} 不符"
+
+
+def test_batching_generates_all_files(config: AppConfig) -> None:
+    parts = [f"Sentence number {i} is here for the batch test." for i in range(1, 13)]
+    items = TextSegmenter(config.segment, language="en").segment_text(
+        " ".join(parts), chapter_id="bt2", normalize=False
+    )
+    with SynthesisSession(config, engine=FakeSynthesisEngine()) as session:
+        report = session.synthesize_segments(
+            items, chapter_id="bt2", title="T", batch_size=5
+        )
+    assert report.failed == 0
+    assert report.generated == len(items)
+    wavs = list((config.project.output_path / "segments" / "bt2").glob("*.wav"))
+    assert len(wavs) == len(items)
+
+
+def test_batch_failure_falls_back_to_per_segment(config: AppConfig) -> None:
+    """整批失败时要降级为逐段重试，把一段的问题与其它段隔离。
+
+    批处理快的代价是"一荣俱荣一损俱损"，所以必须有这条兜底路径。
+    """
+    parts = [f"Sentence number {i} is here for the batch test." for i in range(1, 13)]
+    items = TextSegmenter(config.segment, language="en").segment_text(
+        " ".join(parts), chapter_id="bt3", normalize=False
+    )
+    assert len(items) >= 3
+
+    # 让包含 "number 3" 的那一段必定失败：批量时会拖垮整批
+    config.generation.num_retries = 0
+    engine = FakeSynthesisEngine(fail_on=("number 3 ",))
+    with SynthesisSession(config, engine=engine) as session:
+        report = session.synthesize_segments(
+            items, chapter_id="bt3", title="T", batch_size=8
+        )
+
+    # 只有真正有问题的那一段失败，其余全部成功——这正是"失败隔离"的意义：
+    # 批处理把整批拖失败后，逐段重试救回了其余所有段。
+    assert report.failed == 1, f"期望只失败 1 段，实际 {report.failed}"
+    assert report.generated == len(items) - 1
+    failed_id = report.errors[0][0]
+    assert failed_id.startswith("bt3-")
+
+
+def test_batch_resume_skips_within_batch(config: AppConfig) -> None:
+    """批内也要逐段判断续跑：已存在的段不能被重新生成。"""
+    parts = [f"Sentence number {i} is here for the batch test." for i in range(1, 13)]
+    items = TextSegmenter(config.segment, language="en").segment_text(
+        " ".join(parts), chapter_id="bt4", normalize=False
+    )
+
+    engine = FakeSynthesisEngine()
+    with SynthesisSession(config, engine=engine) as session:
+        session.synthesize_segments(items[:2], chapter_id="bt4", title="T", batch_size=4)
+    first_calls = len(engine.calls)
+
+    with SynthesisSession(config, engine=engine) as session:
+        report = session.synthesize_segments(
+            items, chapter_id="bt4", title="T", batch_size=4
+        )
+
+    assert report.skipped == 2
+    assert report.generated == len(items) - 2
+    # 第二批只应包含剩下的段（不含已跳过的 2 段）
+    for call in engine.calls[first_calls:]:
+        assert len(call) <= 4
+
+
+def test_batch_size_one_still_works(config: AppConfig) -> None:
+    """batch_size=1 是 Mac 的默认路径，必须照常工作。"""
+    parts = [f"Sentence number {i} is here." for i in range(1, 7)]
+    items = TextSegmenter(config.segment, language="en").segment_text(
+        " ".join(parts), chapter_id="bt5", normalize=False
+    )
+    engine = FakeSynthesisEngine()
+    with SynthesisSession(config, engine=engine) as session:
+        report = session.synthesize_segments(
+            items, chapter_id="bt5", title="T", batch_size=1
+        )
+    assert report.failed == 0
+    assert all(len(call) == 1 for call in engine.calls)
+
+
+def test_engine_waveform_count_mismatch_is_rejected(config: AppConfig) -> None:
+    """引擎返回段数与请求不符时必须整批判失败。
+
+    这是很危险的静默错误：如果少返回一段而我们仍然按顺序落盘，
+    就会把第 2 段的音频写进第 1 段的文件名里，而且没有任何报错。
+    所以 :meth:`_synthesize_batch` 会显式核对段数。
+
+    Note:
+        守卫只在**多段批量**时才有意义（逐段调用永远是 1:1），
+        所以这里直接测 :meth:`_synthesize_batch`，而不是走完整流程。
+    """
+    engine = FakeSynthesisEngine()
+    original = engine.synthesize
+
+    def truncating_synthesize(texts, *, language=None):
+        result = original(texts, language=language)
+        result.waveforms = result.waveforms[:1]      # 故意少返回
+        return result
+
+    engine.synthesize = truncating_synthesize        # type: ignore[method-assign]
+
+    # 直接构造 3 个片段：用 segment_text 的话这些短句会被合并成一段，
+    # 而本用例恰恰需要「多段共处一批」才能验证段数核对。
+    items = [
+        Segment(
+            segment_id=f"bt6-{i:04d}",
+            chapter_id="bt6",
+            index=i,
+            text=f"Sentence number {i} is here for the mismatch test.",
+        )
+        for i in range(1, 4)
+    ]
+
+    with SynthesisSession(config, engine=engine) as session:
+        records, error = session._synthesize_batch(
+            items, language=None, attempts=1
+        )
+
+    assert error is not None, "段数不匹配必须报错"
+    assert "不匹配" in error
+    assert len(records) == len(items)
+    assert all(r is None for r in records)
+    # 关键：不能留下任何半成品文件
+    assert not list((config.project.output_path / "segments" / "bt6").glob("*.wav"))
