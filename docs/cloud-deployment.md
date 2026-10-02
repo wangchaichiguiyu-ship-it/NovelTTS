@@ -276,10 +276,16 @@ AutoDL 的**系统盘很小**（本项目实测 30G，模型就占了 14G），�
 大而持久的。整本无损音频约 1.6 GB，产出放系统盘很快就会满。
 
 改法：写进**不入库**的 `config.local.yaml`（**不要改 config.yaml**，
-否则下次更新代码会被冲掉——这是实际踩过的坑）：
+否则下次更新代码会被冲掉——这是实际踩过的坑）。
+
+仓库里带了模板，直接复制改名即可（模板里已按 AutoDL 布局填好）：
+
+```bash
+cp config.local.example.yaml config.local.yaml
+```
 
 ```yaml
-# /root/autodl-tmp/NovelTTS/config.local.yaml
+# /root/autodl-tmp/NovelTTS/config.local.yaml（可从 config.local.example.yaml 复制）
 project:
   output_dir: /root/autodl-tmp/NovelTTS-output/audio    # 绝对路径 -> 数据盘
   work_dir: /root/autodl-tmp/NovelTTS-output/work       # 中间产物也搬过去

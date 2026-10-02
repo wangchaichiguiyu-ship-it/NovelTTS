@@ -1,0 +1,54 @@
+# =============================================================================
+# config.local.yaml 示例（AutoDL + RTX 3090 24G）
+# =============================================================================
+#
+# 这个文件是**模板**，可以入库；真正生效的是同目录下的 config.local.yaml，
+# 它被 .gitignore 排除，因此每台机器各不相同、也不会被代码更新冲掉。
+#
+# 用法：
+#     cp config.local.example.yaml config.local.yaml
+#     # 然后按你的实际路径改
+#
+# 为什么需要它：config.yaml 是入库、团队共享的，里面的 model_path 必须是
+# 通用默认值（HuggingFace 仓库 id）。而每台机器的模型路径不同，如果直接改
+# config.yaml，那么下次更新代码（tar/scp 覆盖）就会把改动冲掉 —— 这是实际
+# 踩过的坑：云端 model_path 被冲回仓库 id，而云端连不上 HF，模型直接加载失败。
+#
+# 优先级：**内置默认 < config.yaml < config.local.yaml < 命令行参数**
+# 只写需要覆盖的字段即可，其余自动沿用 config.yaml。
+# =============================================================================
+
+project:
+  # 产物与中间产物都放**数据盘**。
+  # AutoDL 的系统盘通常只有 30G，模型就占了 14G；整本无损音频约 1.6 GB，
+  # 放系统盘很快就满。数据盘（/root/autodl-tmp）才是大而持久的。
+  #
+  # 绝对路径会被原样采用（不会拼到项目目录下）。
+  output_dir: /root/autodl-tmp/NovelTTS-output/audio
+  work_dir: /root/autodl-tmp/NovelTTS-output/work
+
+generation:
+  # 镜像自带的模型位置（AutoDL 的 qwen3-tts 镜像通常已下载好 4 个模型）
+  model_path: /root/models/Qwen3-TTS-12Hz-1.7B-Base
+  device: cuda
+  # auto = 按显存自推。24G 卡约 12~13；显存吃紧就写死小值
+  batch_size: auto
+  # auto = CUDA 且装了 flash-attn 就用 flash_attention_2
+  attn_implementation: auto
+  # auto = 算力 >= 8.0（30 系起）开启 TF32
+  tf32: auto
+
+audio:
+  # 语速倍率（变速不变调，音高不变）：
+  #   1.0  原速
+  #   1.15 略快，最自然
+  #   1.25 明显快，通勤听刚好
+  #   0.85 放慢
+  # 建议范围 0.5~2.0。也可命令行临时覆盖：--rate 1.2
+  speech_rate: 1.0
+
+# -----------------------------------------------------------------------------
+# 若系统盘实在紧张，也可以把缓存挪走（默认在项目内 output/cache）
+# -----------------------------------------------------------------------------
+# project:
+#   cache_dir: /root/autodl-tmp/NovelTTS-output/cache
