@@ -189,7 +189,23 @@ du -sh /root/autodl-tmp/Qwen3-TTS-12Hz-1.7B-Base
 
 ## 4. 上传项目
 
-### 4.1 本地打包（在**你自己的 Mac** 上执行）
+### 4.1 一键部署（推荐）
+
+仓库里带了 `scripts/deploy_remote.sh`，它做的正是下面 4.2~4.3 的事，
+但**会自动排除 `config.yaml` 与 `config.local.yaml`**——这是关键：
+手敲 tar 很容易把 `config.yaml` 一起覆盖过去，把云端改好的
+`model_path` 冲回 HuggingFace 仓库 id，而云端连不上 HF，模型直接加载失败。
+
+```bash
+./scripts/deploy_remote.sh                    # 默认 host=autodl
+./scripts/deploy_remote.sh --tests            # 传完顺便在远程跑测试
+./scripts/deploy_remote.sh --dry-run          # 只打包，看会传什么
+```
+
+它只传代码/测试/文档（约 200 KB），不传小说、参考音频、模型与配置。
+首次部署仍需按 4.2 把小说与参考音频传上去。
+
+### 4.2 手动打包（在**你自己的 Mac** 上执行）
 
 ```bash
 cd /Users/wanghaoxin/Documents/AustinProject/NovelTTS
@@ -197,6 +213,8 @@ cd /Users/wanghaoxin/Documents/AustinProject/NovelTTS
 # 打包含源码、配置、参考音频；排除模型权重、输出、git 历史
 tar --exclude=output \
     --exclude=.git \
+    --exclude=config.yaml \
+    --exclude=config.local.yaml \
     --exclude='Qwen3-TTS*' \
     --exclude='__pycache__' \
     --exclude='.graphflow-cache' \
@@ -209,7 +227,7 @@ ls -lh ~/noveltts.tar.gz      # 约 13 MB（主要是参考音频）
 
 > **参考音频必须一起上传**（`assets/ref/doubao.wav`）。没有它无法克隆音色。
 
-### 4.2 上传
+### 4.3 上传
 
 在 **VSCode 的远程窗口** 里操作最省事：直接把 `noveltts.tar.gz`
 从本地文件管理器拖进远程的文件树（VSCode 会自动传输）。
@@ -222,7 +240,7 @@ scp -P <端口> ~/noveltts.tar.gz root@<HostName>:/root/autodl-tmp/
 
 > AutoDL 也支持把文件传到 `/root/autodl-tmp` 后用 JupyterLab 的文件面板上传。
 
-### 4.3 解压与安装
+### 4.4 解压与安装
 
 ```bash
 mkdir -p /root/autodl-tmp/NovelTTS
@@ -252,7 +270,47 @@ python run_tests.py | tail -3
 **这一步极其重要**——它在不烧 GPU 时间的前提下，证明代码传全了、
 依赖装对了。如果这里就失败，别急着跑模型。
 
-### 4.4 指向模型路径并改成 CUDA
+### 4.5 把产物目录改到数据盘（强烈建议）
+
+AutoDL 的**系统盘很小**（本项目实测 30G，模型就占了 14G），而**数据盘**才是
+大而持久的。整本无损音频约 1.6 GB，产出放系统盘很快就会满。
+
+改法：写进**不入库**的 `config.local.yaml`（**不要改 config.yaml**，
+否则下次更新代码会被冲掉——这是实际踩过的坑）：
+
+```yaml
+# /root/autodl-tmp/NovelTTS/config.local.yaml
+project:
+  output_dir: /root/autodl-tmp/NovelTTS-output/audio    # 绝对路径 -> 数据盘
+  work_dir: /root/autodl-tmp/NovelTTS-output/work       # 中间产物也搬过去
+
+generation:
+  model_path: /root/models/Qwen3-TTS-12Hz-1.7B-Base
+  device: cuda
+  batch_size: auto
+```
+
+要点：
+
+* **绝对路径**会被原样采用（不会拼到项目目录下）；相对路径仍相对项目根目录
+* 产物在项目之外时，`manifest.json` 里存**绝对路径**；在项目内则存相对路径
+  （便于整个目录搬家）——两种情况 `concat` 都能正确处理
+* 换成绝对路径后，**旧的 output/ 不会自动搬过去**，需要手动 `mv`（见下）
+
+```bash
+# 迁移已有产物（如果之前跑过）
+mkdir -p /root/autodl-tmp/NovelTTS-output
+mv /root/autodl-tmp/NovelTTS/output/* /root/autodl-tmp/NovelTTS-output/ 2>/dev/null
+rmdir /root/autodl-tmp/NovelTTS/output 2>/dev/null
+
+# 验证路径已生效
+noveltts info | grep 输出目录        # 应显示数据盘路径
+```
+
+> 为什么 `work_dir` 也搬：`chapters.json` 与片段索引虽然不大，但它们与产物
+> 同生命周期；放在一起便于整体备份或迁移到新实例。
+
+### 4.6 指向模型路径并改成 CUDA
 
 ```bash
 cd /root/autodl-tmp/NovelTTS
@@ -270,7 +328,7 @@ EOF
 > `device` / `batch_size` / `tf32` / `attn_implementation` 保持 `auto` 即可，
 > 程序会自己判断。想固定也可以显式写 `cuda` / `9` / `true`。
 
-### 4.5 把小说放进去
+### 4.7 把小说放进去
 
 ```bash
 # 上传你的 epub / txt

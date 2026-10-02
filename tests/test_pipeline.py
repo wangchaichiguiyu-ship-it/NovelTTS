@@ -812,3 +812,83 @@ def test_engine_waveform_count_mismatch_is_rejected(config: AppConfig) -> None:
     assert all(r is None for r in records)
     # 关键：不能留下任何半成品文件
     assert not list((config.project.output_path / "segments" / "bt6").glob("*.wav"))
+
+
+def test_output_dir_outside_project(tmp_path: Path) -> None:
+    """输出目录可以在**项目之外**（例如云端把产物放数据盘）。
+
+    这是云端部署的实际需求：项目在系统盘（小而贵），产物放数据盘（大）。
+    需要保证三件事：
+      1. 绝对路径不被拼到 project.root 上；
+      2. manifest 里的 audio_path 允许是绝对路径；
+      3. concat 能从绝对路径正确找到片段（``root / abs`` 会丢弃 root）。
+    """
+    from noveltts.concat import concat_from_manifest
+    from noveltts.utils import read_json
+
+    project = tmp_path / "NovelTTS"
+    output = tmp_path / "data-disk" / "NovelTTS-output"   # 项目之外
+    project.mkdir()
+
+    config = AppConfig.from_dict({})
+    config.project.root = str(project)
+    config.project.output_dir = str(output)               # 绝对路径
+    config.project.resolve(project)
+    config.project.ensure_dirs()
+    config.voice.ref_audio = "x"
+    config.voice.ref_text = "y"
+
+    # 绝对路径必须被原样采用，不能被拼到 root 下
+    assert config.project.output_path == output.resolve()
+    assert not str(config.project.output_path).startswith(str(project.resolve()))
+
+    items = TextSegmenter(config.segment, language="en").segment_text(
+        "Sentence one is here for the test. Sentence two is also here for it.",
+        chapter_id="c001",
+        normalize=False,
+    )
+    dump_segments_index(items, work_path=config.project.work_path)
+
+    with SynthesisSession(config, engine=FakeSynthesisEngine()) as session:
+        report = session.synthesize_segments(items, chapter_id="c001", title="T")
+    assert report.failed == 0
+
+    # manifest 存绝对路径（因为无法相对 project.root 表示）
+    payload = read_json(config.project.output_path / "segments" / "c001" / "manifest.json")
+    recorded = payload["records"][0]["audio_path"]
+    assert Path(recorded).is_absolute()
+    assert Path(recorded).is_file()
+
+    # concat 要能顺着绝对路径找到片段并成功拼接
+    result = concat_from_manifest(config, "c001")
+    assert result.output_path.is_file()
+    assert result.missing == []
+    assert result.duration > 0
+    # 章节成品也落在项目之外
+    assert result.output_path.parent == config.project.output_path
+
+
+def test_relative_output_dir_still_works(tmp_path: Path) -> None:
+    """回归：默认的**相对**输出目录不能被绝对路径支持改坏。"""
+    from noveltts.utils import read_json
+
+    config = AppConfig.from_dict({})
+    config.project.root = str(tmp_path)
+    config.project.resolve(tmp_path)          # output_dir 保持默认的 output/audio
+    config.project.ensure_dirs()
+    config.voice.ref_audio = "x"
+    config.voice.ref_text = "y"
+
+    assert config.project.output_path == (tmp_path / "output" / "audio").resolve()
+
+    items = TextSegmenter(config.segment, language="en").segment_text(
+        "A single sentence for the relative path test.", chapter_id="c002", normalize=False
+    )
+    with SynthesisSession(config, engine=FakeSynthesisEngine()) as session:
+        session.synthesize_segments(items, chapter_id="c002", title="T")
+
+    payload = read_json(config.project.output_path / "segments" / "c002" / "manifest.json")
+    recorded = payload["records"][0]["audio_path"]
+    # 项目内的产物仍存相对路径，便于整个目录搬家
+    assert not Path(recorded).is_absolute()
+    assert recorded.startswith("output/audio/")
