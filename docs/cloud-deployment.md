@@ -359,6 +359,82 @@ noveltts info
 
 ## 5. 开跑（先试听，再全书）
 
+### 5.0 日常操作速查（在远程终端里）
+
+```bash
+ssh autodl
+cd /root/autodl-tmp/NovelTTS
+
+# 环境自检（不加载模型）
+/root/miniconda3/bin/noveltts info
+
+# ① 解析 + 看章节 ID
+/root/miniconda3/bin/noveltts parse --list
+
+# ② 洗稿预览（不写文件）
+/root/miniconda3/bin/noveltts normalize --chapter c003
+
+# ③ 试听 5 段（第一次用 GPU，看加速方案日志）
+/root/miniconda3/bin/noveltts synth --chapter c003 --limit 5
+
+# ④ 调语速试听（重点：必须加 --force，否则会跳过已存在的片段）
+/root/miniconda3/bin/noveltts synth --chapter c003 --limit 5 --rate 1.2 --force
+
+# ⑤ 满意后跑全书（约 2 小时，可随时 Ctrl-C，重跑自动续）
+nohup /root/miniconda3/bin/noveltts run > run.log 2>&1 &
+tail -f run.log          # Ctrl-C 只退出查看，任务继续
+
+# ⑥ 合并整本 + 压缩
+/root/miniconda3/bin/noveltts concat --merge-book --book-name "我的有声书"
+/root/miniconda3/bin/noveltts encode
+```
+
+> **为什么命令前要加 `/root/miniconda3/bin/`**：AutoDL 的 conda 不在
+> 非交互式 SSH 的 PATH 里。想省掉前缀就每次先执行：
+> ```bash
+> source /root/miniconda3/etc/profile.d/conda.sh && conda activate base
+> ```
+> 之后直接写 `noveltts ...` 即可。
+
+### 5.0.1 调语速的正确姿势
+
+语速是**生成后**对音频做的处理（相位声码器，音高不变），所以：
+
+| 做法 | 效果 |
+|---|---|
+| `--rate 1.2` 配 `--force` | ✅ 重新生成并变速，正确 |
+| `--rate 1.2` 不配 `--force` | ❌ 已存在的片段被**跳过**，语速不会变 |
+| 改 `config.local.yaml` 的 `speech_rate` | 对**新片段**生效，已存在的仍需 `--force` |
+
+推荐流程（先用几段试出合适的语速，再跑全书）：
+
+```bash
+# 1) 同一段用不同语速各生成一次，下载下来对比
+for r in 1.0 1.1 1.25; do
+  noveltts synth --chapter c003 --segments 4 --rate $r --force
+  cp $OUT/segments/c003/c003-0004.wav ~/rate_$r.wav    # $OUT 见下方
+done
+
+# 2) 选定后写进 config.local.yaml，之后全书都用它
+#    audio:
+#      speech_rate: 1.15
+
+# 3) 跑全书
+nohup noveltts run > run.log 2>&1 &
+```
+
+语速对照：
+
+| `--rate` | 听感 |
+|---|---|
+| `1.0` | 原速 |
+| `1.1` ~ `1.15` | 略快，**最自然**（推荐起点） |
+| `1.25` | 明显快，通勤听刚好 |
+| `1.5` | 很快，开始有轻微金属感 |
+| `0.85` | 放慢，适合难懂内容 |
+
+建议范围 `0.5 ~ 2.0`。超出后相位声码器的瑕疵会明显。
+
 ### 5.1 前三步是纯 CPU，先跑掉
 
 ```bash
