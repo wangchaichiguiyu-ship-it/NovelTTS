@@ -198,6 +198,106 @@ def trim_silence(
     return samples[start:end]
 
 
+# --------------------------------------------------------------------------- #
+# 语速调节（变速不变调）
+# --------------------------------------------------------------------------- #
+
+
+def time_stretch(
+    samples: "object",
+    *,
+    rate: float,
+    sample_rate: int = 24_000,
+) -> "object":
+    """改变语速但**保持音高不变**。
+
+    为什么不用简单重采样
+    --------------------
+
+    直接改采样率（``samples[::2]`` 之类）会连带把音高一起抬高，
+    听感像是"快进的唐老鸭"。这里用的是**相位声码器（phase vocoder）**，
+    它把时间轴拉伸与音高解耦：
+
+    * ``rate > 1`` -> 说得更快，时长变短（``1.25`` 表示快 25%）
+    * ``rate < 1`` -> 说得更慢，时长变长
+    * ``rate == 1`` -> 原样返回（不做任何计算）
+
+    实现来源：``librosa.effects.time_stretch``。librosa 已经是
+    ``qwen_tts`` 的依赖，所以**不引入任何新依赖**；万一环境里没有
+    librosa，会自动退回"不处理"并给出警告，而不是让整个跑批失败。
+
+    Args:
+        samples: 单声道或多声道 float 数组。
+        rate: 速度倍率，必须 > 0。建议范围 ``0.5 ~ 2.0``，
+            超出后相位声码器的瑕疵会明显。
+        sample_rate: 采样率（仅用于日志与校验）。
+
+    Returns:
+        处理后的数组；``rate == 1`` 或 librosa 不可用时原样返回。
+
+    Note:
+        效果最好的是微调（0.9~1.15）。差别越大，金属感/回声感越明显——
+        这是相位声码器的固有代价，不是 bug。
+    """
+    if rate <= 0:
+        raise ValueError(f"speech_rate 必须 > 0，收到 {rate}")
+    if abs(rate - 1.0) < 1e-6:
+        return samples
+    if len(samples) == 0:  # type: ignore[arg-type]
+        return samples
+
+    try:
+        import warnings
+
+        from librosa.effects import time_stretch as _librosa_stretch
+    except ImportError as exc:
+        logger.warning(
+            "无法调节语速：librosa 不可用（%s）。将按原速输出。", exc
+        )
+        return samples
+
+    try:
+        # librosa 1.0 会为已废弃参数发 FutureWarning，这里静音掉免得刷屏
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FutureWarning)
+            stretched = _librosa_stretch(samples, rate=float(rate))
+    except Exception as exc:  # noqa: BLE001 - 变速失败不应让整段音频报废
+        logger.warning("语速调节失败（%s），按原速输出：%s", rate, exc)
+        return samples
+
+    np = _np()
+    result = np.asarray(stretched, dtype=np.float32)
+    logger.debug(
+        "语速 %.3f：%.2fs -> %.2fs", rate, len(samples) / sample_rate, len(result) / sample_rate
+    )
+    return result
+
+
+def speed_factor_to_rate(value: float) -> float:
+    """把可读性更好的写法换算成 ``time_stretch`` 的 rate。
+
+    约定（与 ffmpeg 的 ``atempo`` / 播放器习惯一致）：
+
+    * ``value > 1`` -> **说得更快**（``1.25`` = 快 25%），rate 直接等于它
+    * ``value <= 1`` -> **说得更慢**（``0.8`` = 慢到 80%），rate 同样等于它
+
+    也就是说这个函数目前是"透传 + 校验"，存在的意义是**把语义写清楚**，
+    避免以后有人误以为 ``0.8`` 表示"快 0.8 倍"。
+
+    Args:
+        value: 速度倍率。
+
+    Returns:
+        合法的 rate（> 0）。
+
+    Raises:
+        ValueError: 非正数。
+    """
+    if value <= 0:
+        raise ValueError(f"速度倍率必须 > 0，收到 {value}")
+    return float(value)
+
+
 def tail_is_quiet(
     samples: "object",
     *,

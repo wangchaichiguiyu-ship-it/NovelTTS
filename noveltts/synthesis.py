@@ -34,10 +34,12 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from . import accelerator
 from .audio_io import (
     audio_available,
     normalize_audio,
     probe_audio,
+    time_stretch,
     trim_silence,
     write_audio,
 )
@@ -45,7 +47,6 @@ from .config import AppConfig
 from .engine import SynthesisEngine, build_engine
 from .models import Chapter, ChapterAudioManifest, Segment, SegmentRecord
 from .utils import (
-    chunked,
     ensure_dir,
     format_duration,
     get_logger,
@@ -237,6 +238,16 @@ class SynthesisSession:
                 samples = result.waveforms[0]
                 sample_rate = int(result.sample_rate or self.sample_rate)
 
+                # 处理顺序是有讲究的：
+                #   1) 先调语速 —— 变速会改变波形长度与包络，放在归一化之前
+                #      才能让归一化基于最终音频计算；
+                #   2) 再裁静音 —— 变速可能引入轻微的边界噪声；
+                #   3) 最后归一化 —— 保证最终落盘的文件响度一致。
+                if abs(audio_config.speech_rate - 1.0) > 1e-6:
+                    samples = time_stretch(
+                        samples, rate=audio_config.speech_rate, sample_rate=sample_rate
+                    )
+
                 if audio_config.trim_silence:
                     samples = trim_silence(
                         samples,
@@ -313,7 +324,7 @@ class SynthesisSession:
             return SynthesisReport(chapter_id=chapter_id or "empty")
 
         chapter_id = chapter_id or segments[0].chapter_id
-        batch_size = max(1, batch_size or self.config.generation.batch_size)
+        batch_size = self._resolve_batch_size(batch_size)
         report = SynthesisReport(chapter_id=chapter_id, title=title, total=len(segments))
         started = time.time()
 
@@ -355,8 +366,13 @@ class SynthesisSession:
         # 记录最近若干段的耗时，用于给出准确的剩余时间估计
         recent: deque[float] = deque(maxlen=20)
         processed = 0
+        generated_since_clean = 0
+        clean_every = self._cache_clear_interval()
 
-        for batch in chunked(segments, batch_size):
+        index = 0
+        total_segments = len(segments)
+        while index < total_segments:
+            batch = segments[index:index + batch_size]
             for segment in batch:
                 item_started = time.time()
 
@@ -379,20 +395,35 @@ class SynthesisSession:
                 if record.error:
                     report.failed += 1
                     report.errors.append((segment.segment_id, record.error))
+                    # 显存不足时自动把批大小减半：不这样做的话，一个过大的
+                    # 批次会让后面每一段都重复 OOM，整章白跑。
+                    new_size = self._maybe_shrink_batch(batch_size, record.error)
+                    if new_size != batch_size:
+                        batch_size = new_size
                 else:
                     report.generated += 1
                     report.audio_seconds += record.duration
                     recent.append(time.time() - item_started)
+                    generated_since_clean += 1
 
                 if self.config.generation.progress_every and (
                     processed % self.config.generation.progress_every == 0
-                    or processed == len(segments)
+                    or processed == total_segments
                 ):
-                    self._log_progress(processed, len(segments), report, recent, segments)
+                    self._log_progress(processed, total_segments, report, recent, segments)
 
-            # 一个批次结束，做一次内存整理
-            gc.collect()
-            _release_device_cache(self.engine)
+                # 按「段数间隔」清理设备缓存，而不是每批都清。
+                # 每批都清会打断流水线；从不清则分配器缓存缓慢膨胀。
+                if clean_every and generated_since_clean >= clean_every:
+                    gc.collect()
+                    _release_device_cache(self.engine)
+                    generated_since_clean = 0
+
+            index += len(batch)
+
+        # 收尾再做一次整理，把长跑积累的缓存还给系统
+        gc.collect()
+        _release_device_cache(self.engine)
 
         manifest.updated_at = _now()
         report.elapsed_seconds = time.time() - started
@@ -507,6 +538,66 @@ class SynthesisSession:
         )
 
     # ---------------------------------------------------------------- 内部
+    def _resolve_batch_size(self, override: int | None) -> int:
+        """决定本次跑批的批大小。
+
+        优先级：显式参数 > 配置文件 > 引擎探明的硬件推荐值。
+
+        Note:
+            ``generation.batch_size`` 允许写 ``auto``（或 ``-1``），此时用
+            :attr:`QwenTTSEngine.profile` 里按显存推导出的值。
+            非 Qwen 引擎（例如测试用的假引擎）没有 profile，退回 1。
+        """
+        if override is not None and override > 0:
+            return int(override)
+
+        configured = self.config.generation.batch_size
+        if isinstance(configured, str) and configured.lower() == "auto":
+            configured = -1
+        if isinstance(configured, int) and configured > 0:
+            return configured
+
+        profile = getattr(self.engine, "profile", None)
+        if profile is not None:
+            return max(1, int(profile.batch_size))
+        return 1
+
+    def _cache_clear_interval(self) -> int:
+        """返回「每生成多少段清理一次设备缓存」；0 表示不清理。"""
+        configured = self.config.generation.clear_cache_every
+        if configured > 0:
+            return configured
+        profile = getattr(self.engine, "profile", None)
+        if profile is not None:
+            return int(profile.clear_cache_every)
+        return 50
+
+    def _maybe_shrink_batch(self, current: int, error: str | None) -> int:
+        """遇到显存不足时把批大小减半（最低 1）。
+
+        Args:
+            current: 当前批大小。
+            error: 失败原因文本。
+
+        Returns:
+            新的批大小；不需要调整时原样返回 ``current``。
+        """
+        if not error or current <= 1:
+            return current
+        if not self.config.generation.oom_batch_downgrade:
+            return current
+        if not accelerator.is_oom_error(RuntimeError(error)):
+            return current
+
+        new_size = max(1, current // 2)
+        logger.warning(
+            "检测到显存不足，批大小 %d -> %d（后续片段按新批大小继续）",
+            current,
+            new_size,
+        )
+        _release_device_cache(self.engine)
+        return new_size
+
     def _skip_if_present(self, segment: Segment) -> SegmentRecord | None:
         """文件已存在则返回 skip 记录，否则 ``None``。"""
         target = self.segment_path(segment)
@@ -574,6 +665,7 @@ class SynthesisSession:
             "normalize": audio.normalize,
             "target_dbfs": audio.target_dbfs,
             "min_gap_seconds": audio.min_gap_seconds,
+            "speech_rate": audio.speech_rate,
         }
 
     def _relative(self, path: Path) -> str:

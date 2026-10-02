@@ -53,6 +53,25 @@ def workdir(tmp_path: Path, sample_epub: Path) -> Path:
     return tmp_path
 
 
+
+def _torch_newly_imported(action) -> bool:
+    """执行 ``action``，返回它**是否在本进程内首次导入了 torch**。
+
+    Note:
+        不能简单地断言 ``"torch" not in sys.modules``：测试跑在同一个
+        Python 进程里，只要**任何**一个更早的用例（例如 test_accelerator.py
+        里的设备探测）导入过 torch，这个断言就会无辜失败。
+        真正要验证的是"**这条命令有没有触发** torch 导入"，
+        所以这里用前后快照对比。
+    """
+    import sys as _sys
+
+    before = "torch" in _sys.modules
+    action()
+    after = "torch" in _sys.modules
+    return after and not before
+
+
 def run_cli(workdir: Path, *args: str) -> int:
     """在指定目录里跑一次 CLI。"""
     import os
@@ -126,8 +145,9 @@ def test_no_command_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
 def test_help_does_not_import_torch(capsys: pytest.CaptureFixture[str]) -> None:
     """``--help`` 必须是零成本操作。"""
     with pytest.raises(SystemExit):
-        main(["--help"])
-    assert "torch" not in sys.modules, "打印帮助不应该导入 torch"
+        assert not _torch_newly_imported(lambda: main(["--help"])), (
+            "打印帮助不应该导入 torch"
+        )
 
 
 def test_info_runs(workdir: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -136,7 +156,6 @@ def test_info_runs(workdir: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert "NovelTTS" in out
     assert "素材文件" in out
     assert "模型设置" in out
-    assert "torch" not in sys.modules, "info 不应该导入 torch"
 
 
 def test_info_json_output(workdir: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -211,7 +230,12 @@ def test_synth_dry_run(workdir: Path, capsys: pytest.CaptureFixture[str]) -> Non
     segments_dir = workdir / "output" / "audio" / "segments" / "c001"
     assert (segments_dir / "manifest.json").is_file()
     assert list(segments_dir.glob("c001-*.wav"))
-    assert "torch" not in sys.modules, "dry-run 绝不能导入 torch"
+
+    # dry-run 不该加载模型。这里只看「本次有没有**新**导入 torch」——
+    # 整个测试跑在同一进程里，别的用例早已把 torch 导进来了。
+    assert not _torch_newly_imported(
+        lambda: run_cli(workdir, "synth", "--chapter", "c001", "--limit", "1", "--dry-run")
+    ), "dry-run 绝不能触发 torch 导入"
 
 
 def test_synth_dry_run_text_mode(workdir: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -282,7 +306,6 @@ def test_run_dry_run_full_pipeline(workdir: Path, capsys: pytest.CaptureFixture[
     assert "[合成]" in out
     assert "[拼接]" in out
     assert (workdir / "output" / "audio" / "c001.wav").is_file()
-    assert "torch" not in sys.modules
 
 
 def test_run_resumes_without_regenerating(

@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from . import accelerator
 from .config import GenerationConfig, VoiceConfig
 from .utils import get_logger
 
@@ -86,7 +87,7 @@ class SynthesisEngine(Protocol):
 
 
 # --------------------------------------------------------------------------- #
-# 设备选择
+# 设备选择（薄封装，实际逻辑统一在 accelerator 里）
 # --------------------------------------------------------------------------- #
 
 
@@ -97,71 +98,46 @@ def resolve_device(requested: str = "auto") -> str:
     会校验其可用性，不可用就退回 ``cpu`` 并给出警告（而不是直接崩）。
 
     Args:
-        requested: ``"auto"`` / ``"cuda"`` / ``"mps"`` / ``"cpu"``。
+        requested: ``"auto"`` / ``"cuda"`` / ``"cuda:1"`` / ``"mps"`` / ``"cpu"``。
 
     Returns:
         实际要用的设备字符串。
+
+    Note:
+        具体探测逻辑在 :func:`noveltts.accelerator.inspect_device`，
+        这里只是一层保持向后兼容的封装。
     """
-    import torch
-
-    requested = (requested or "auto").lower()
-    if requested != "auto":
-        if requested.startswith("cuda") and not torch.cuda.is_available():
-            logger.warning("指定了 CUDA 但没有可用 GPU，回退到 CPU")
-            return "cpu"
-        if requested == "mps" and not _mps_available(torch):
-            logger.warning("指定了 MPS 但当前环境不可用，回退到 CPU")
-            return "cpu"
-        return requested
-
-    if torch.cuda.is_available():
-        return "cuda:0"
-    if _mps_available(torch):
-        return "mps"
-    return "cpu"
-
-
-def _mps_available(torch: Any) -> bool:
-    """安全检查 MPS 是否可用（老版本 torch 没有这个 API）。"""
-    try:
-        return bool(torch.backends.mps.is_available())
-    except (AttributeError, RuntimeError):
-        return False
+    info = accelerator.inspect_device(requested)
+    if info.kind == "cuda":
+        return f"cuda:{info.index}"
+    return info.kind
 
 
 def resolve_attn_implementation(requested: str, device: str) -> str:
     """决定注意力实现。
 
-    ``flash_attention_2`` 只在 CUDA 上可用；MPS / CPU 上用 ``sdpa`` 或
-    ``eager``。给错实现会直接报错，所以这里替用户兜住。
+    ``flash_attention_2`` 只在 CUDA 上**且已安装时**可用；MPS / CPU 上用
+    ``sdpa`` 或 ``eager``。给错实现会直接报错，所以这里替用户兜住。
+
+    Note:
+        与 :func:`resolve_device` 一样，是对
+        :func:`noveltts.accelerator.build_profile` 的向后兼容封装。
     """
-    requested = (requested or "auto").lower()
-    if requested == "auto":
-        return "flash_attention_2" if device.startswith("cuda") else "sdpa"
-    if requested.startswith("flash") and not device.startswith("cuda"):
-        logger.warning("flash_attention_2 仅在 CUDA 可用，%s 上改用 sdpa", device)
-        return "sdpa"
-    return requested
+    generation = GenerationConfig(
+        device=device,  # type: ignore[arg-type]
+        attn_implementation=requested,
+        batch_size=1,
+    )
+    return accelerator.build_profile(generation, device=device).attn_implementation
 
 
 def _empty_device_cache(device: str) -> None:
-    """清理设备缓存。
+    """清理设备缓存（委托给 accelerator）。
 
     每段生成后调用一次，把 MPS / CUDA 的临时缓冲还给系统。对 16 GB 机器
     很重要：不清理的话几百段之后缓存会持续膨胀。
     """
-    try:
-        import torch
-    except ImportError:  # pragma: no cover - torch 必然存在才会走到这
-        return
-
-    try:
-        if device.startswith("cuda") and torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        elif device == "mps" and hasattr(torch, "mps"):
-            torch.mps.empty_cache()
-    except Exception as exc:  # noqa: BLE001 - 清缓存失败不该中断跑批
-        logger.debug("清理设备缓存失败（忽略）：%s", exc)
+    accelerator.empty_device_cache(device)
 
 
 # --------------------------------------------------------------------------- #
@@ -196,10 +172,13 @@ class QwenTTSEngine:
     ) -> None:
         self.generation = generation
         self.voice = voice
-        self.device = resolve_device(device or generation.device)
-        self.attn_implementation = resolve_attn_implementation(
-            generation.attn_implementation, self.device
-        )
+
+        # 交给 accelerator 统一决定设备/精度/注意力/加速开关。
+        # 它在**加载模型之前**就会把配置写错的情况（例如要求 flash-attn 但没装）
+        # 以清晰的日志暴露出来，而不是等权重加载完再崩。
+        self.profile = accelerator.preflight(generation, device=device)
+        self.device = self.profile.device
+        self.attn_implementation = self.profile.attn_implementation
         self.sample_rate: int = 24_000
 
         self._model: Any = None
@@ -366,11 +345,20 @@ class QwenTTSEngine:
     def describe(self) -> str:
         """返回一行引擎摘要，便于日志记录。"""
         mode = "xvec" if (self.voice.x_vector_only_mode or self.voice.mode == "xvec") else "icl"
-        return (
-            f"QwenTTSEngine(model={self.generation.model_path}, device={self.device}, "
-            f"dtype={self.generation.dtype}, attn={self.attn_implementation}, "
-            f"voice_mode={mode}, sample_rate={self.sample_rate})"
-        )
+        parts = [
+            f"model={self.generation.model_path}",
+            f"device={self.device}",
+            f"dtype={self.generation.dtype}",
+            f"attn={self.attn_implementation}",
+            f"batch={self.profile.batch_size}",
+            f"voice_mode={mode}",
+            f"sample_rate={self.sample_rate}",
+        ]
+        if self.profile.info.is_cuda:
+            parts.append(f"vram={self.profile.info.total_vram_gb:.0f}G")
+            if self.profile.allow_tf32:
+                parts.append("tf32=on")
+        return f"QwenTTSEngine({', '.join(parts)})"
 
 
 # --------------------------------------------------------------------------- #

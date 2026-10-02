@@ -100,13 +100,20 @@ def test_resolve_device_falls_back_from_bad_cuda() -> None:
     assert resolve_device("cuda:0") == "cpu"
 
 
-def test_resolve_attn_auto_by_device() -> None:
-    assert resolve_attn_implementation("auto", "cuda:0") == "flash_attention_2"
-    assert resolve_attn_implementation("auto", "mps") == "sdpa"
-    assert resolve_attn_implementation("auto", "cpu") == "sdpa"
+def test_resolve_attn_auto_on_non_cuda_is_sdpa() -> None:
+    """本机没有 CUDA，因此 auto 必须落到 sdpa。
+
+    Note:
+        想看 "CUDA 上 auto 会不会选中 flash_attention_2"，
+        请用 tests/test_accelerator.py —— 那里注入假的 DeviceInfo，
+        不需要真的插一张卡。
+    """
+    for device in ("mps", "cpu"):
+        assert resolve_attn_implementation("auto", device) == "sdpa"
 
 
-def test_resolve_attn_downgrades_flash_on_non_cuda() -> None:
+def test_resolve_attn_downgrades_flash_without_cuda() -> None:
+    """配置里写死 flash_attention_2，但机器没有 CUDA 时必须降级而不是崩。"""
     assert resolve_attn_implementation("flash_attention_2", "mps") == "sdpa"
     assert resolve_attn_implementation("flash_attention_2", "cpu") == "sdpa"
 
@@ -551,3 +558,99 @@ def test_batch_size_does_not_break_resume(config: AppConfig) -> None:
     assert payload["done_count"] == len(items)
     wavs = list((config.project.output_path / "segments" / "cb").glob("*.wav"))
     assert len(wavs) == len(items)
+
+
+def test_speech_rate_changes_duration(config: AppConfig) -> None:
+    """语速倍率要真的生效：1.5 倍速下同一段音频应当明显变短。
+
+    同时验证它写进了 manifest（否则音频无法复现）。
+    """
+    from noveltts.audio_io import probe_audio
+
+    segmenter = TextSegmenter(config.segment, language="en")
+    items = segmenter.segment_text(
+        "The library was quiet that morning, and nobody said a word for a long while. "
+        "Outside the rain kept falling on the empty courtyard below.",
+        chapter_id="rate1",
+        normalize=False,
+    )
+    assert items
+
+    # --- 原速 ---
+    config.audio.speech_rate = 1.0
+    with SynthesisSession(config, engine=FakeSynthesisEngine()) as session:
+        session.synthesize_segments(items, chapter_id="rate1", title="Normal")
+    normal_dir = config.project.output_path / "segments" / "rate1"
+    normal_total = sum(probe_audio(p).duration for p in sorted(normal_dir.glob("*.wav")))
+
+    # --- 1.5 倍速 ---
+    config.audio.speech_rate = 1.5
+    with SynthesisSession(config, engine=FakeSynthesisEngine()) as session:
+        report = session.synthesize_segments(
+            items, chapter_id="rate1", title="Fast", force=True
+        )
+    fast_total = sum(probe_audio(p).duration for p in sorted(normal_dir.glob("*.wav")))
+
+    assert report.failed == 0
+    assert fast_total < normal_total * 0.8, (
+        f"1.5 倍速后总时长 {fast_total:.2f}s 未明显短于原速 {normal_total:.2f}s"
+    )
+
+    payload = read_json(normal_dir / "manifest.json")
+    assert payload["settings"]["speech_rate"] == 1.5
+
+
+def test_speech_rate_one_skips_processing(config: AppConfig) -> None:
+    """rate=1 时不应调用变速（省时间，也避免无谓的相位声码器瑕疵）。"""
+    config.audio.speech_rate = 1.0
+    segmenter = TextSegmenter(config.segment, language="en")
+    items = segmenter.segment_text("A single short sentence for the test.", chapter_id="rate2")
+    with SynthesisSession(config, engine=FakeSynthesisEngine()) as session:
+        report = session.synthesize_segments(items, chapter_id="rate2", title="T")
+    assert report.failed == 0
+    payload = read_json(config.project.output_path / "segments" / "rate2" / "manifest.json")
+    assert payload["settings"]["speech_rate"] == 1.0
+
+
+def test_batch_size_auto_resolves_from_profile(config: AppConfig) -> None:
+    """``batch_size: auto`` 要能落到引擎 profile 给出的值。
+
+    假引擎没有 profile，所以这里直接测会话的解析逻辑：
+    非 Qwen 引擎必须安全退回 1，而不能崩。
+    """
+    config.generation.batch_size = "auto"
+    with SynthesisSession(config, engine=FakeSynthesisEngine()) as session:
+        assert session._resolve_batch_size(None) == 1
+
+
+def test_batch_size_explicit_overrides_config(config: AppConfig) -> None:
+    config.generation.batch_size = "auto"
+    with SynthesisSession(config, engine=FakeSynthesisEngine()) as session:
+        assert session._resolve_batch_size(4) == 4
+
+
+def test_cache_clear_interval_defaults_without_profile(config: AppConfig) -> None:
+    config.generation.clear_cache_every = 0
+    with SynthesisSession(config, engine=FakeSynthesisEngine()) as session:
+        assert session._cache_clear_interval() == 50
+
+
+def test_cache_clear_interval_respects_config(config: AppConfig) -> None:
+    config.generation.clear_cache_every = 7
+    with SynthesisSession(config, engine=FakeSynthesisEngine()) as session:
+        assert session._cache_clear_interval() == 7
+
+
+def test_oom_error_shrinks_batch(config: AppConfig) -> None:
+    """显存不足时批大小自动减半，避免后续每段都重复 OOM。"""
+    with SynthesisSession(config, engine=FakeSynthesisEngine()) as session:
+        assert session._maybe_shrink_batch(8, "CUDA out of memory. Tried to allocate 2 GiB") == 4
+        assert session._maybe_shrink_batch(1, "CUDA out of memory") == 1
+        assert session._maybe_shrink_batch(8, "CUDA error: device-side assert") == 8
+        assert session._maybe_shrink_batch(8, None) == 8
+
+
+def test_oom_downgrade_can_be_disabled(config: AppConfig) -> None:
+    config.generation.oom_batch_downgrade = False
+    with SynthesisSession(config, engine=FakeSynthesisEngine()) as session:
+        assert session._maybe_shrink_batch(8, "CUDA out of memory") == 8

@@ -610,3 +610,88 @@ def test_concat_all_chapters_merges_book(tmp_path: Path) -> None:
     assert book.chapter_id == "book"
     assert book.output_path.name == "book.wav"
     assert book.duration > 0.6
+
+
+# --------------------------------------------------------------------------- #
+# 语速调节（变速不变调）
+# --------------------------------------------------------------------------- #
+
+
+def _dominant_freq(samples, sr: int) -> float:
+    """用 FFT 找主频，用来验证变速后音高不变。"""
+    window = min(8192, len(samples))
+    if window < 64:
+        return 0.0
+    spec = np.abs(np.fft.rfft(samples[:window] * np.hanning(window)))
+    return float(np.fft.rfftfreq(window, 1 / sr)[int(np.argmax(spec))])
+
+
+def test_time_stretch_identity_when_rate_is_one() -> None:
+    """rate=1 必须原样返回（不做任何计算，省时间也避免精度损失）。"""
+    from noveltts.audio_io import time_stretch
+
+    tone = make_tone(0.5)
+    assert time_stretch(tone, rate=1.0, sample_rate=SAMPLE_RATE) is tone
+
+
+def test_time_stretch_shortens_and_lengthens() -> None:
+    from noveltts.audio_io import time_stretch
+
+    tone = make_tone(1.0)
+    fast = time_stretch(tone, rate=1.25, sample_rate=SAMPLE_RATE)
+    slow = time_stretch(tone, rate=0.8, sample_rate=SAMPLE_RATE)
+    assert len(fast) < len(tone) < len(slow)
+    # 1.25 倍速 -> 约 0.8 倍时长
+    assert len(fast) == pytest.approx(len(tone) / 1.25, rel=0.1)
+    assert len(slow) == pytest.approx(len(tone) / 0.8, rel=0.1)
+
+
+def test_time_stretch_preserves_pitch() -> None:
+    """核心保证：变速**不变调**。
+
+    这是"为什么不用简单重采样"的回归测试——重采样会把 220Hz 抬成 275Hz。
+    """
+    from noveltts.audio_io import time_stretch
+
+    tone = make_tone(1.5)
+    original = _dominant_freq(tone, SAMPLE_RATE)
+    assert original == pytest.approx(220.0, abs=5.0)
+
+    for rate in (0.8, 1.25, 1.5):
+        stretched = time_stretch(tone, rate=rate, sample_rate=SAMPLE_RATE)
+        pitch = _dominant_freq(stretched, SAMPLE_RATE)
+        assert pitch == pytest.approx(original, rel=0.03), (
+            f"rate={rate} 时主频从 {original:.1f}Hz 变成 {pitch:.1f}Hz，音高被改变了"
+        )
+
+
+def test_time_stretch_rejects_non_positive_rate() -> None:
+    from noveltts.audio_io import time_stretch
+
+    with pytest.raises(ValueError):
+        time_stretch(make_tone(0.1), rate=0.0)
+    with pytest.raises(ValueError):
+        time_stretch(make_tone(0.1), rate=-1.5)
+
+
+def test_time_stretch_handles_empty() -> None:
+    from noveltts.audio_io import time_stretch
+
+    empty = np.zeros(0, dtype=np.float32)
+    assert len(time_stretch(empty, rate=1.5, sample_rate=SAMPLE_RATE)) == 0
+
+
+def test_time_stretch_output_is_float32() -> None:
+    from noveltts.audio_io import time_stretch
+
+    out = time_stretch(make_tone(0.3), rate=1.2, sample_rate=SAMPLE_RATE)
+    assert out.dtype == np.float32
+
+
+def test_speed_factor_validation() -> None:
+    from noveltts.audio_io import speed_factor_to_rate
+
+    assert speed_factor_to_rate(1.25) == 1.25
+    assert speed_factor_to_rate(0.8) == 0.8
+    with pytest.raises(ValueError):
+        speed_factor_to_rate(0)
