@@ -525,7 +525,74 @@ screen -r tts                      # 重新连上查看
 
 适合你想随时进去看滚动的日志。`setsid` 方式更适合纯后台跑批。
 
-#### 监控进度
+#### 监控进度（三种方式，按好用程度排序）
+
+**方式一：一键状态面板（推荐）**
+
+仓库里带了 `scripts/remote_status.sh`，在**本地 Mac** 上跑：
+
+```bash
+./scripts/remote_status.sh              # 看一次
+./scripts/remote_status.sh --watch 60   # 每 60 秒自动刷新（Ctrl-C 退出）
+```
+
+输出：
+
+```
+════════════════════════════════════════════════════════
+  ✅ 生成中    已运行 05:52
+════════════════════════════════════════════════════════
+  片段进度   214 / 3220  (6%)
+  已写体积   49M
+  GPU        32 %, 7140 MiB, 24576 MiB
+  数据盘     50G 可用 / 50G
+  失败/降级  0 / 0
+────────────────────────────────────────────────────────
+  最近完成的章节：
+    完成 c001 Foreword | 新生成 62 | 跳过 0 | 音频 04:54 | 耗时 02:25 | RTF 0.49
+════════════════════════════════════════════════════════
+```
+
+它是**只读**的，随时可跑，不会干扰生成任务。
+主机名/目录可用环境变量覆盖：`NOVELTTS_HOST=autodl ./scripts/remote_status.sh`。
+
+**方式二：直接 tail 远程日志（要看实时滚动时）**
+
+```bash
+ssh autodl 'tail -f /root/autodl-tmp/NovelTTS/run_full.log'
+```
+
+`Ctrl-C` 只退出查看，**不影响**正在跑的任务。
+
+日志噪音较多（模型的 `configuration...` / `pad_token_id` 之类），
+只想看关键行就过滤一下：
+
+```bash
+ssh autodl 'tail -f /root/autodl-tmp/NovelTTS/run_full.log' \
+  | grep --line-buffered -E "完成 |开始合成|失败|降级"
+```
+
+**方式三：关键指标一行输出（适合丢进脚本或定时任务）**
+
+```bash
+ssh autodl 'cd /root/autodl-tmp/NovelTTS &&   echo "片段 $(find /root/autodl-tmp/NovelTTS-output/audio/segments -name "*.wav" | wc -l | tr -d " ")/3220   | $(du -sh /root/autodl-tmp/NovelTTS-output | cut -f1)   | 失败 $(grep -c "最终失败" run_full.log)   | 进程 $(pgrep -fc "noveltts run")"'
+```
+
+#### 怎么判断"正常"与"异常"
+
+| 指标 | 正常 | 异常信号 |
+|---|---|---|
+| 片段数 | 持续增长 | 长时间不涨 → 看日志是否卡住 |
+| 失败 / 降级 | `0 / 0` | 出现数字 → 用 `--retry-failed` 补 |
+| RTF | `0.4 ~ 0.6` | 明显变大 → GPU 被抢或显存不足 |
+| GPU 利用率 | 30~60% | 长期 0% → 进程可能已死 |
+| 数据盘可用 | 递减但充足 | 快速下降 → 磁盘将满 |
+
+**进度换算**：全书预估 3.82 小时音频，RTF ≈ 0.5，
+所以总耗时约 **1.9 小时**。按片段数算：
+`已用时间 / 已完成片段 × 剩余片段 = 预计剩余`。
+
+#### 旧的监控方式（以下为命令备忘）
 
 ```bash
 tail -f run_full.log               # 实时看（Ctrl-C 只退出查看，不影响任务）
