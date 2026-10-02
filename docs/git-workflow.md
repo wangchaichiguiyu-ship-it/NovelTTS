@@ -20,15 +20,23 @@ git config --local --get user.name
 git config --local --get user.email
 ```
 
-如果是全新克隆且要改成你自己的身份，**推荐只改本仓库**（不动全局配置）：
+> ⚠️ **当前 `user.email` 是占位符 `wanghaoxin@localhost`。**
+> 这台机器上没有全局 git 身份，为了不擅自改动你的全局配置，我把它设成了
+> **仅对本仓库生效**的占位值。推到 GitHub / Gitee 之前请改成你自己的：
 
 ```bash
+# 只改本仓库（推荐，不动全局）
 git config user.name  "你的名字"
 git config user.email "你的邮箱@example.com"
+
+# 想全局生效（影响这台机器上所有仓库）
+# git config --global user.name  "你的名字"
+# git config --global user.email "你的邮箱@example.com"
 ```
 
 > 为什么要配身份：git 会把它写进每个提交，用于 `git log` / `git blame` 追责。
-> 当前值是占位符 `wanghaoxin@localhost`，推到 GitHub 前建议改掉。
+> 邮件填错不会导致推送失败，但 GitHub 无法把它归到你的账号下
+> （提交记录里会显示成一个无头像的陌生作者）。
 
 ---
 
