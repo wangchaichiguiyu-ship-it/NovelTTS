@@ -104,12 +104,22 @@ def test_non_cuda_batch_is_always_one() -> None:
 
 
 @pytest.mark.parametrize(
-    ("vram", "expected_max"),
-    [(8, 1), (12, 3), (16, 4), (24, 6), (32, 9), (48, 14), (80, 16)],
+    ("vram", "expected"),
+    [
+        # 依据：固定占用 4.5G，每样本 1.2G（实测 0.75G 留 60% 余量），
+        # 预算 = 总显存 × 0.8，上限 16。
+        (8, 2),
+        (12, 5),
+        (16, 7),
+        (24, 13),   # RTX 3090 的档位
+        (32, 16),   # 触达上限
+        (48, 16),
+        (80, 16),
+    ],
 )
-def test_batch_scales_with_vram(vram: float, expected_max: int) -> None:
+def test_batch_scales_with_vram(vram: float, expected: int) -> None:
     batch, _ = recommend_batch_size(cuda_info(vram))
-    assert batch == expected_max, f"{vram}G 期望 {expected_max}，得到 {batch}"
+    assert batch == expected, f"{vram}G 期望 {expected}，得到 {batch}"
 
 
 def test_batch_is_capped() -> None:
@@ -266,7 +276,7 @@ def test_profile_for_24g_cuda_with_flash() -> None:
 
     assert profile.device == "cuda:0"
     assert profile.attn_implementation == "flash_attention_2"
-    assert profile.batch_size == 6
+    assert profile.batch_size == 13
     assert profile.allow_tf32 is True
     assert profile.cudnn_benchmark is True
     assert profile.clear_cache_every == 50
@@ -284,7 +294,7 @@ def test_profile_respects_explicit_batch_size() -> None:
 def test_profile_auto_batch_accepts_minus_one() -> None:
     generation = GenerationConfig(device="cuda", batch_size=-1)
     profile = build_profile(generation, device_info=cuda_info(24.0), flash_probe=flash_yes)
-    assert profile.batch_size == 6
+    assert profile.batch_size == 13
 
 
 def test_profile_for_mac_never_enables_cuda_features() -> None:

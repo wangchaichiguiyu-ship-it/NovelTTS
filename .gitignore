@@ -75,6 +75,10 @@ dist/
 .eggs/
 pip-wheel-metadata/
 
+# 本机专属配置（模型绝对路径、设备、批大小等），不入库
+config.local.yaml
+config.local.yml
+
 # 虚拟环境
 .venv/
 venv/
@@ -141,3 +145,6 @@ run.log
 # -----------------------------------------------------------------------------
 *.tar.gz
 *.zip
+
+# 远程访问专用密钥（绝不入库）
+.remote-key/
