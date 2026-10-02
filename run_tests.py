@@ -140,7 +140,10 @@ class _Mark:
             for position, raw in enumerate(argvalues):
                 if isinstance(raw, _Param):
                     values, custom_id = raw.values, raw.id
-                elif len(names) == 1 and not isinstance(raw, (tuple, list)):
+                elif len(names) == 1:
+                    # 单参数：整个 argvalue 就是那一个值，**不拆元组**。
+                    # 否则参数化成 (7, 5) 这种元组会被撕成两个值，
+                    # 函数收到 7 而不是 (7, 5)。
                     values, custom_id = (raw,), None
                 else:
                     values, custom_id = tuple(raw), None

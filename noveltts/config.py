@@ -271,22 +271,34 @@ class VoiceConfig:
 
 @dataclass
 class GenerationConfig:
-    """模型加载与采样参数。
+    """模型加载、采样参数，以及硬件加速开关。
+
+    所有 ``auto`` 值都由 :mod:`noveltts.accelerator` 按**实测硬件**决定；
+    写死具体值则永远优先，方便手工压测。
 
     Attributes:
         model_path: 本地模型目录或 HuggingFace/ModelScope 仓库 id。
         device: ``auto`` 会按 cuda > mps > cpu 选择。
         dtype: 权重精度。``bfloat16`` 最省内存（约为 float32 的一半）。
-        attn_implementation: ``flash_attention_2``（仅 CUDA）或 ``sdpa`` / ``eager``。
+        attn_implementation: ``auto`` 时 CUDA 上优先 FlashAttention 2
+            （需已安装，否则自动退回 sdpa）；也可写死 ``sdpa`` / ``eager``。
         max_new_tokens: 单次生成上限。片段级合成用不到 2048（模型卡评测值），
             默认 1024 已非常充裕；调大只会让显存预留变多。
-        batch_size: 一次前向的片段数。16 GB 内存建议 1；云端显存充足可调到 4~8。
+        batch_size: 一次前向的片段数。``auto`` 按显存推导；``-1`` 同 ``auto``。
+            **16 GB 统一内存请保持 1**（Mac 的显存与内存是同一块物理内存）。
+        tf32: ``auto`` 时在 CUDA 且算力 >= 8.0 的卡上开启 TF32 矩阵乘，
+            换取明显吞吐提升，对语音听感影响可忽略。
+        cudnn_benchmark: ``auto`` 时在 CUDA 上开启，让 cuDNN 为固定形状挑最快算法。
+        clear_cache_every: 每多少段清理一次设备缓存；``0`` 表示 ``auto``
+            （CUDA/MPS 每 50 段，CPU 不清理）。
         non_streaming_mode: ``True`` 一次性看全文（质量略好）；``False`` 模拟流式输入。
         num_retries: 单段失败重试次数。
         retry_backoff: 重试间隔基数（秒），实际间隔为 ``base * 2**attempt``。
         skip_existing: 已存在的片段 wav 是否跳过（断点续跑的关键）。
         keep_last_segments: 只生成最后 N 段（供试听）；``0`` 表示全部。
         progress_every: 每 N 段打印一次进度。
+        oom_batch_downgrade: 连续遇到显存不足时自动把批大小减半
+            （最低 1），避免整章因为一个过大批次反复失败。
     """
 
     model_path: str = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
@@ -294,7 +306,11 @@ class GenerationConfig:
     dtype: DtypeName = "bfloat16"
     attn_implementation: str = "auto"
     max_new_tokens: int = 1024
-    batch_size: int = 1
+    batch_size: int | Literal["auto"] = 1
+    tf32: bool | Literal["auto"] = "auto"
+    cudnn_benchmark: bool | Literal["auto"] = "auto"
+    clear_cache_every: int = 0
+    oom_batch_downgrade: bool = True
     non_streaming_mode: bool = True
     num_retries: int = 2
     retry_backoff: float = 1.5
@@ -330,6 +346,10 @@ class AudioConfig:
         tail_quiet_threshold_dbfs: 判定“尾部已有静音”的门限。
         join_fade_ms: 拼接处淡入淡出时长，用于消除咔嗒声。
         save_segments: 是否保留片段 wav（压缩为 16-bit 后体积很小，建议保留）。
+        speech_rate: **语速倍率**（变速不变调）。
+            ``1.0`` 原速；``1.2`` 快 20%；``0.85`` 慢 15%。
+            建议范围 ``0.5~2.0``，微调（0.9~1.15）效果最好。
+            实现用相位声码器，音高保持不变；超出范围后会有轻微金属感。
     """
 
     sample_rate: int = 24_000
@@ -345,6 +365,7 @@ class AudioConfig:
     tail_quiet_threshold_dbfs: float = -38.0
     join_fade_ms: float = 15.0
     save_segments: bool = True
+    speech_rate: float = 1.0
 
 
 @dataclass

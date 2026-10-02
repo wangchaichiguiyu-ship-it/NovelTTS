@@ -135,8 +135,15 @@ def build_parser() -> argparse.ArgumentParser:
     synth.add_argument("--force", action="store_true", help="已存在的片段也重新生成")
     synth.add_argument("--no-title", action="store_true", help="不朗读章节标题")
     synth.add_argument("--language", default=None, help="覆盖语言（如 English/Chinese）")
-    synth.add_argument("--batch-size", type=int, default=None, help="批大小（16G 内存建议 1）")
+    synth.add_argument(
+        "--batch-size", default=None,
+        help="批大小：auto 按显存自推，或写数字（Mac 16G 建议 1，云端 24G 可 4~8）",
+    )
     synth.add_argument("--device", default=None, help="覆盖设备：auto/cuda/mps/cpu")
+    synth.add_argument(
+        "--rate", type=float, default=None,
+        help="语速倍率（变速不变调）：1.0 原速，1.2 快 20%%，0.85 慢 15%%（建议 0.5~2.0）",
+    )
     synth.add_argument(
         "--retry-failed", action="store_true", help="只重跑 manifest 里失败的片段"
     )
@@ -171,8 +178,15 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--no-encode", action="store_true", help="跳过压缩")
     run.add_argument("--no-concat", action="store_true", help="跳过拼接")
     run.add_argument("--language", default=None, help="覆盖语言")
-    run.add_argument("--device", default=None, help="覆盖设备")
-    run.add_argument("--batch-size", type=int, default=None, help="批大小")
+    run.add_argument("--device", default=None, help="覆盖设备：auto/cuda/mps/cpu")
+    run.add_argument(
+        "--batch-size", default=None,
+        help="批大小：auto 按显存自推，或写数字（Mac 16G 建议 1，云端 24G 可 4~8）",
+    )
+    run.add_argument(
+        "--rate", type=float, default=None,
+        help="语速倍率（变速不变调）：1.0 原速，1.2 快 20%%，0.85 慢 15%%（建议 0.5~2.0）",
+    )
     run.add_argument(
         "--dry-run", action="store_true", help="用假引擎跑通全流程（不加载模型）"
     )
@@ -251,9 +265,17 @@ def _load_config(args: argparse.Namespace) -> AppConfig:
     if getattr(args, "device", None):
         overrides.setdefault("generation", {})["device"] = args.device
     if getattr(args, "batch_size", None):
-        overrides.setdefault("generation", {})["batch_size"] = args.batch_size
+        # 允许写 "auto" 让程序按显存自推；纯数字字符串转成 int
+        raw_batch = str(args.batch_size).strip().lower()
+        overrides.setdefault("generation", {})["batch_size"] = (
+            "auto" if raw_batch == "auto" else int(raw_batch)
+        )
     if getattr(args, "language", None):
         overrides.setdefault("generation", {})["language"] = args.language
+    if getattr(args, "rate", None) is not None:
+        if args.rate <= 0:
+            raise ValueError(f"--rate 必须 > 0，收到 {args.rate}")
+        overrides.setdefault("audio", {})["speech_rate"] = float(args.rate)
     if getattr(args, "format", None):
         overrides.setdefault("encode", {})["format"] = args.format
     if getattr(args, "bitrate", None):
