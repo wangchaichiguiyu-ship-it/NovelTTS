@@ -1,0 +1,230 @@
+# =============================================================================
+# NovelTTS 配置文件
+# =============================================================================
+#
+# 所有相对路径都以**本文件所在目录**为基准解析，因此可以从任意工作目录调用
+# `noveltts -c /path/to/config.yaml ...`，行为一致。
+#
+# 修改后用 `noveltts info` 检查，再跑：
+#   noveltts parse --list                     # 确认切章
+#   noveltts normalize --chapter c002         # 确认洗稿效果
+#   noveltts segment --chapter c002 --preview 60   # 确认切分粒度
+#   noveltts synth --chapter c002 --limit 5   # 只生成 5 段试听
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 路径
+# -----------------------------------------------------------------------------
+project:
+  source_dir: sources              # 原始素材（epub/txt）
+  work_dir: output/work            # 中间产物：章节 JSON、片段 JSON、纯文本
+  output_dir: output/audio         # 成品：片段 wav、章节 wav、m4a
+  cache_dir: output/cache          # 音色 prompt 等缓存
+
+# -----------------------------------------------------------------------------
+# 切章策略
+# -----------------------------------------------------------------------------
+parse:
+  # 小于该字符数的单元直接丢弃（版权页、图片页、广告页）
+  min_chapter_chars: 200
+  # 命中任一正则的标题会被当成「非正文」丢弃（大小写不敏感）
+  skip_title_patterns:
+    - "^table of contents"
+    - "^contents$"
+    - "^color gallery"
+    - "^title page$"
+    - "^copyright"
+    - "^credits"
+    - "^newsletter"
+    - "^also available"
+    - "^about the (author|series)"
+    - "^cover"
+  merge_short_into_previous: false   # 短单元是并入上一章还是丢弃
+  drop_reference_sections: true
+  default_language: en
+
+  # 逐段丢弃的样板文字（版权页 / ISBN / 许可声明）。
+  # 这些内容读出来毫无意义，而且夹杂数字与全大写字母，最容易念错。
+  # 默认值刻意保守，只收录几乎不可能出现在正文里的句子：
+  # 实测这本书 19 万字，一条都没有命中（不会误伤正文）。
+  # 命中的段落会写进 DEBUG 日志，用 -v 可以看到丢了什么。
+  exclude_paragraph_patterns:
+    - '\bAll rights reserved\b'
+    - '\bISBN[\s:：]*[\d\-Xx]{10,17}'
+    - '\bReproduction in whole or in part\b'
+    - '\bwithout (?:the )?(?:prior )?written permission\b'
+    - '^Copyright\s*(?:\u00a9|\(c\))?\s*\d{4}'
+    - '\bThis (?:book|work) is a work of fiction\b'
+    - '\bPrinted in\b[^.]{0,40}\b(?:China|USA|United States|Japan)\b'
+
+# -----------------------------------------------------------------------------
+# 洗稿规则（把模型念不对的缩写/数字/符号转成文字）
+# -----------------------------------------------------------------------------
+text_rules:
+  enabled: true
+  language: auto        # auto / en / zh / ja
+
+  # 这些片段原样保留，绝不改写
+  protect_patterns:
+    - 'https?://\S+'
+    - 'www\.\S+'
+    - '\b[\w.+-]+@[\w-]+\.[\w.]+\b'
+
+  # 你自己的缩写表；会与内置表合并，同名时以这里为准
+  #
+  # 注意两条约定：
+  #   1) 大小写敏感。想同时匹配大小写就写两条。
+  #   2) 多义缩写（p. / min. / v. …）默认不启用，需要就自己加。
+  abbreviations:
+    "Mr.": "Mister"
+    "Mrs.": "Missus"
+    "Dr.": "Doctor"
+    "Prof.": "Professor"
+    "St.": "Saint"
+    "etc.": "et cetera"
+    "e.g.": "for example"
+    "i.e.": "that is"
+    "vs.": "versus"
+    "approx.": "approximately"
+    "Vol.": "Volume"
+    "Ch.": "Chapter"
+    # 下面这些是按需启用的例子，取消注释即可生效：
+    # "dept.": "department"
+    # "govt.": "government"
+    # "ft": "feet"
+    # "min.": "minutes"
+
+  # 需要「后面紧跟数字」才展开的缩写。
+  # "No. 5" -> "Number 5"，但 "No. Not everything." 里的否定词不受影响。
+  numeric_context_abbreviations:
+    "No.": "Number"
+
+  # 大数字口语化阈值：>= 该值的整百数会读成 "fifteen hundred" 这种更口语的形式
+  large_numbers: 1100
+
+  year_range: true                 # 1990-1995 -> 1990 to 1995
+  ordinal_numbers: true            # 2nd -> second
+  number_followed_by_noun: true    # 3 apples -> three apples
+  roman_numerals: true             # Vol. IV -> Volume four
+  dashes: true                     # 破折号按上下文转逗号/句号/删除
+  quotes: straight                 # straight / cjk / keep
+  ellipsis: true                   # ... -> …
+  unicode_normalize: NFC           # NFC / NFKC / none
+  collapse_whitespace: true
+  strip_markup: true
+  cjk_numbers: true                # 中文数字规则（中文小说才生效）
+
+  # 中文量词表：用于「三十岁 -> 30岁」这类转换
+  cjk_measure_pairs:
+    "个": "个"
+    "岁": "岁"
+    "年": "年"
+    "月": "月"
+    "日": "日"
+    "点": "点"
+    "分": "分"
+    "秒": "秒"
+    "元": "元"
+    "米": "米"
+    "公里": "公里"
+    "层": "层"
+    "号": "号"
+    "级": "级"
+    "班": "班"
+    "人": "人"
+    "次": "次"
+    "倍": "倍"
+
+  # 最后执行的「正则 -> 替换」规则，优先级最高。
+  # 例（把特定人名统一读法）：
+  # custom_replacements:
+  #   "\\bNukumizu\\b": "Nukumizu"
+
+# -----------------------------------------------------------------------------
+# 语意切分（决定每个片段多长）
+# -----------------------------------------------------------------------------
+segment:
+  max_chars: 120          # 单片段目标上限（可朗读字符数）
+  min_chars: 24           # 低于此值的碎片会与邻居合并
+  hard_max_chars: 200     # 硬上限，超过就按从句切
+  merge_short: true
+  keep_dialogue_separate: true    # 对话与叙述不混在一个片段
+  split_on_paragraph: false       # true = 禁止跨自然段合并（更保守）
+  paragraph_break_chars: 90       # 允许跨段合并时的长度上限
+  tail_clause_min_chars: 12
+
+# -----------------------------------------------------------------------------
+# 音色克隆（Base 模型专有）
+# -----------------------------------------------------------------------------
+voice:
+  ref_audio: assets/ref/doubao.wav   # 参考音频（相对项目根目录，或写绝对路径）
+  # 参考音频对应的文本。ICL 模式必填；留空会自动退回 xvec 模式（相似度略低）。
+  # 请把 doubao.wav 里实际说的那句话填在这里（越准克隆相似度越高）。
+  ref_text: "Let’s talk about the quiet magic of waiting for a kettle to boil on a slow morning. You don’t check your phone, you just lean against the counter, watch the steam curl up, and notice the faint hum of the appliance under the silence. It’s a tiny pause that breaks the rush of jumping from one task to the next, no to-do list yelling for attention, no notifications popping up to pull your focus away. In that 60 seconds or so, you don’t have to be productive, you just get to be present, letting your mind wander gently instead of racing ahead to what comes next. Those unplanned little gaps end up being the moments that make a regular day feel soft and grounded, not just a string of things to get done."
+  x_vector_only_mode: false
+  mode: icl                # icl = 参考音频+文本（质量最好）；xvec = 只用音色向量
+  prompt_cache: true
+
+# -----------------------------------------------------------------------------
+# 模型与生成参数
+# -----------------------------------------------------------------------------
+generation:
+  # 本地模型目录（已下载好）；也可以填 HuggingFace/ModelScope 仓库 id
+  model_path: Qwen3-TTS-12Hz-1.7B-Base
+  device: auto             # auto / cuda / mps / cpu
+  dtype: bfloat16          # bfloat16 最省内存（约为 float32 的一半）
+  attn_implementation: auto    # auto -> CUDA 用 flash_attention_2，其它用 sdpa
+  # 单次生成上限。模型卡评测时用 2048，但我们是「一两次一句话」逐段合成，
+  # 片段平均只有 60 字符，1024 已经非常充裕。调大只会让显存预留变多。
+  max_new_tokens: 1024
+
+  # 批大小：16 GB 统一内存请保持 1。
+  # 批处理会把多段音频同时留在显存里，而 Mac 的显存和内存是同一块物理内存。
+  batch_size: 1
+
+  non_streaming_mode: true   # true = 一次性看全文（质量略好）
+  num_retries: 2             # 单段失败重试次数
+  retry_backoff: 1.5         # 重试间隔基数（秒），实际为 base * 2^n
+  skip_existing: true        # 已存在的片段跳过（断点续跑的关键）
+  progress_every: 10         # 每 N 段打印一次进度
+
+  # 采样参数：留空(null)表示沿用模型自带的 generate_config.json
+  temperature: null
+  top_k: null
+  top_p: null
+  repetition_penalty: null
+
+  # 语言：这本书是英译本。模型支持 10 种语言，可命令行覆盖：
+  #   noveltts synth --chapter c001 --language Chinese
+  language: English
+
+# -----------------------------------------------------------------------------
+# 音频格式与响度
+# -----------------------------------------------------------------------------
+audio:
+  sample_rate: 24000       # Qwen3-TTS-12Hz 输出固定 24 kHz
+  channels: 1
+  normalize: peak          # peak（峰值归一，稳） / rms（响度更一致） / none
+  target_dbfs: -1.5        # peak 模式目标峰值
+  target_rms_dbfs: -20.0   # rms 模式目标响度
+  max_gain_db: 12.0        # 增益上限，避免放大底噪
+  trim_silence: false      # 裁掉片段首尾静音（打开后停顿更均匀）
+  silence_threshold_dbfs: -50.0
+  min_gap_seconds: 0.32    # 片段之间的默认停顿
+  tail_quiet_gain: 0.35    # 片段尾部自带静音时，停顿缩小的比例
+  tail_quiet_threshold_dbfs: -38.0
+  join_fade_ms: 15.0       # 拼接处淡入淡出，消除咔嗒声
+  save_segments: true      # 保留片段 wav（便于断点续跑与重拼）
+
+# -----------------------------------------------------------------------------
+# 成品压缩（需要 ffmpeg；macOS 没装 ffmpeg 时 m4a 会自动改用 afconvert）
+# -----------------------------------------------------------------------------
+encode:
+  enabled: true
+  format: m4a              # m4a / mp3 / opus / flac / copy
+  bitrate: 64k             # 语音内容 48k~64k 基本听不出差别
+  sample_rate: 24000
+  channels: 1
+  ffmpeg_bin: ffmpeg
+  extra_args: []
+  keep_wav: true           # 保留无损 wav 作为母版

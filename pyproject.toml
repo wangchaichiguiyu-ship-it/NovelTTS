@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "noveltts"
+version = "1.0.0"
+description = "小说 -> 有声书流水线：EPUB/TXT 洗稿、语意切分、Qwen3-TTS 声音克隆、流式拼接与压缩"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "NovelTTS" }]
+keywords = ["tts", "audiobook", "epub", "qwen3-tts", "voice-clone"]
+
+# 核心依赖：只有文本处理 → 音频读写的必需品。
+# torch / qwen-tts 刻意**不**放进必需依赖：
+#   * 只跑 parse / normalize / segment 时完全不需要它们；
+#   * 云端镜像通常自己预装特定 CUDA 版本的 torch，由 pip 代劳容易装错。
+dependencies = [
+    "numpy>=1.24",
+    "soundfile>=0.12",
+]
+
+[project.optional-dependencies]
+# 真正合成语音所需（GPU 环境装）
+tts = [
+    "torch>=2.1",
+    "qwen-tts>=0.1.1",
+    "transformers>=4.40",
+    "accelerate>=0.30",
+]
+# 配置文件用 YAML（不装也能跑：内置极简解析器）
+yaml = ["PyYAML>=6.0"]
+# 开发/测试
+dev = [
+    "pytest>=7.4",
+    "PyYAML>=6.0",
+]
+
+[project.scripts]
+noveltts = "noveltts.cli:main"
+
+[tool.setuptools]
+packages = ["noveltts"]
+
+[tool.setuptools.package-data]
+noveltts = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
+ignore = [
+    "E501",   # 行长由 formatter 控制，注释里允许长行
+    "B008",   # dataclass field(default_factory=...) 是正常用法
+]

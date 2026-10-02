@@ -1,0 +1,70 @@
+{
+  // 调试配置：直接用 VSCode 的 F5 跑各子命令
+  // 注意 synth / run 会加载模型，其余子命令是纯 CPU 轻量操作
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "noveltts info",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "noveltts.cli",
+      "args": ["info"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "noveltts parse --list",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "noveltts.cli",
+      "args": ["parse", "--list"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "noveltts segment (c003)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "noveltts.cli",
+      "args": ["segment", "--chapter", "c003", "--preview", "20"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "noveltts synth --dry-run (不加载模型)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "noveltts.cli",
+      "args": ["synth", "--chapter", "c003", "--limit", "5", "--dry-run"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "noveltts synth --limit 1 (真实模型)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "noveltts.cli",
+      "args": ["synth", "--chapter", "c003", "--limit", "1"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "pytest: 当前文件",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["${file}", "-v"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "run_tests.py (零依赖测试)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/run_tests.py",
+      "args": ["-v"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}

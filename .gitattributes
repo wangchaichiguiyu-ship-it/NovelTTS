@@ -1,0 +1,56 @@
+# =============================================================================
+# .gitattributes —— 换行符、二进制标记、语言统计
+# =============================================================================
+
+# 默认：交给 git 自动判断文本/二进制
+* text=auto
+
+# -----------------------------------------------------------------------------
+# 强制 LF：保证 Linux（云端）与 macOS 之间不出现 ^M
+# -----------------------------------------------------------------------------
+*.py        text eol=lf
+*.md        text eol=lf
+*.yaml      text eol=lf
+*.yml       text eol=lf
+*.toml      text eol=lf
+*.cfg       text eol=lf
+*.ini       text eol=lf
+*.txt       text eol=lf
+*.json      text eol=lf
+*.sh        text eol=lf
+.gitignore  text eol=lf
+.gitattributes text eol=lf
+
+# Windows 脚本保持 CRLF
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+*.ps1       text eol=crlf
+
+# -----------------------------------------------------------------------------
+# 二进制：禁止 git 做任何文本转换与 diff
+# -----------------------------------------------------------------------------
+*.wav       binary
+*.mp3       binary
+*.m4a       binary
+*.flac      binary
+*.opus      binary
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.pdf       binary
+*.epub      binary
+*.safetensors binary
+*.bin       binary
+*.pt        binary
+*.pth       binary
+*.onnx      binary
+*.gguf      binary
+
+# -----------------------------------------------------------------------------
+# 语言统计：让 GitHub 的 linguist 正确识别
+# -----------------------------------------------------------------------------
+*.md        linguist-documentation
+docs/*      linguist-documentation
+tests/*     linguist-detectable
