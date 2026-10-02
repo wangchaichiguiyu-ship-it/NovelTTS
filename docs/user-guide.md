@@ -1,7 +1,13 @@
 # NovelTTS 使用说明书
 
 > 这份文档面向**实际操作**：从零配环境、导入小说、逐条敲命令，到拿到有声书。
-> 设计细节与原理请见 [README.md](README.md)，这里只讲"怎么做、会看到什么"。
+>
+> 配套文档：
+> - [cloud-deployment.md](cloud-deployment.md) —— 云端（AutoDL / NVIDIA GPU）部署与验证
+> - [git-workflow.md](git-workflow.md) —— 本仓库的 git 使用规范与常用命令
+> - [../README.md](../README.md) —— 设计与原理
+>
+> 设计细节与原理请见 [README.md](../README.md)，这里只讲"怎么做、会看到什么"。
 
 ---
 
@@ -352,124 +358,24 @@ noveltts concat --merge-book --book-name "Too Many Losing Heroines Vol 8"
 
 ---
 
-## 3. 从零开始在云端配置（Linux + NVIDIA GPU）
+## 3. 云端部署（AutoDL + NVIDIA GPU）
 
-下面假设你用一台全新的 Ubuntu 机器（比如 4090 / A100 实例）。
-**顺序不要变**，每一步都有验证方式。
+完整步骤在 **[cloud-deployment.md](cloud-deployment.md)**，包含：
 
-### 3.1 装 Miniconda 与创建环境
+* AutoDL 实例的选择建议（GPU 型号 / 显存 / 镜像 / 数据盘）
+* 用 VSCode Remote-SSH 连上去之后，逐条敲哪些命令
+* NVIDIA 专属优化开关（程序按 `config.yaml` 自动判断，一般不用手改）
+* **三层验证清单**：环境对不对、项目传全没传全、能不能真的出声
+* 长跑建议（nohup / tmux、断点续跑、成本估算）
 
-```bash
-# 1) 装 Miniconda（若机器已有 conda 可跳过）
-wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
-bash Miniconda3-latest-Linux-x86_64.sh -b -p $HOME/miniconda3
-eval "$($HOME/miniconda3/bin/conda shell.bash hook)"
+一句话预告：**云端不需要改任何代码**，只改 `config.yaml` 的 `generation` 段：
 
-# 2) 创建 Python 3.12 环境（与官方推荐一致）
-conda create -n qwen3-tts python=3.12 -y
-conda activate qwen3-tts
+```yaml
+generation:
+  device: cuda              # auto 也会自动选到 cuda，写死更明确
+  batch_size: auto          # 按显存自动决定（24G 建议 4~8）
+  attn_implementation: auto # CUDA 上自动用 flash_attention_2
 ```
-
-### 3.2 装依赖
-
-```bash
-# PyTorch（按你的 CUDA 版本选，下面以 CUDA 12.4 为例）
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
-
-# Qwen3-TTS 官方包
-pip install -U qwen-tts
-
-# 本项目的依赖
-pip install numpy soundfile PyYAML
-
-# FFmpeg（压缩音频用；Ubuntu 需要 apt）
-sudo apt-get update && sudo apt-get install -y ffmpeg
-```
-
-**验证**：
-
-```bash
-python -c "import torch; print('CUDA 可用:', torch.cuda.is_available(), '|', torch.cuda.get_device_name(0))"
-ffmpeg -version | head -1
-```
-
-`CUDA 可用: True` 才算成功。
-
-### 3.3 装 FlashAttention 2（可选，但强烈建议）
-
-它能显著降低显存占用并提速。**只在 CUDA 上有用**，Mac 上装了也不会启用。
-
-```bash
-# 内存小的机器加 MAX_JOBS 限制并行编译，避免 OOM
-MAX_JOBS=4 pip install -U flash-attn --no-build-isolation
-```
-
-> 编译可能耗时 10~30 分钟。装不上也不影响使用，
-> 程序会自动退回 `sdpa`（日志里会有一行 warning）。
-
-### 3.4 下载模型到本地（**推荐**，避免每次启动联网）
-
-```bash
-pip install -U modelscope        # 国内推荐
-modelscope download --model Qwen/Qwen3-TTS-12Hz-1.7B-Base \
-    --local_dir ./Qwen3-TTS-12Hz-1.7B-Base
-
-# 或者用 HuggingFace
-# pip install -U "huggingface_hub[cli]"
-# huggingface-cli download Qwen/Qwen3-TTS-12Hz-1.7B-Base --local-dir ./Qwen3-TTS-12Hz-1.7B-Base
-```
-
-### 3.5 上传项目 + 参考音频 + 小说
-
-```bash
-# 在本地打包（排除模型权重与输出）
-cd /Users/wanghaoxin/Documents/AustinProject/NovelTTS
-tar --exclude=output --exclude=.git --exclude='Qwen3-TTS*' \
-    -czf noveltts.tar.gz noveltts tests config.yaml pyproject.toml README.md run_tests.py sources doubao.wav
-
-# 传到云端
-scp noveltts.tar.gz user@your-server:~/
-
-# 云端解压
-ssh user@your-server
-mkdir -p ~/NovelTTS && tar -xzf noveltts.tar.gz -C ~/NovelTTS && cd ~/NovelTTS
-```
-
-> **参考音频必须一起上传**（`doubao.wav`）。云端没有它就无法克隆音色。
-
-### 3.6 安装并验证
-
-```bash
-cd ~/NovelTTS
-pip install -e . --no-deps        # 安装 noveltts 命令
-
-# 改配置：设备改成 cuda，显存够就把批大小调大
-python - <<'EOF'
-from pathlib import Path
-p = Path("config.yaml"); t = p.read_text(encoding="utf-8")
-t = t.replace("device: auto", "device: cuda")
-t = t.replace("batch_size: 1", "batch_size: 4")     # 显存 <24GB 请保持 1
-p.write_text(t, encoding="utf-8")
-EOF
-
-noveltts info                       # 应显示 设备: cuda
-noveltts run --chapter c003 --limit 5    # 先试听 5 段
-```
-
-### 3.7 云端长跑建议
-
-```bash
-# 用 nohup 防止 SSH 断开导致中断
-nohup noveltts run > run.log 2>&1 &
-tail -f run.log                     # 看进度；Ctrl-C 只退出查看，不影响任务
-
-# 即使真的断了，重跑同一条命令即可自动续跑
-noveltts run
-```
-
-`--force` 会强制重新生成，**不要**在续跑时加它。
-
----
 
 ## 4. 命令速查表
 
