@@ -11,6 +11,8 @@
 > | **开发可视化界面** / 查接口与参数 | **[docs/API-REFERENCE.md](docs/API-REFERENCE.md)** ← 全部接口规范 |
 > | 在自己电脑上操作 | [docs/user-guide.md](docs/user-guide.md) |
 > | 上云端 GPU 跑 | [docs/cloud-deployment.md](docs/cloud-deployment.md) |
+> | 接手项目 / 看已知弱点 | [docs/TECH-DEBT.md](docs/TECH-DEBT.md) |
+> | 想做成拖拽式软件 | [docs/PRODUCTIZATION.md](docs/PRODUCTIZATION.md) |
 > | 参与开发 / 版本管理 | [docs/git-workflow.md](docs/git-workflow.md) |
 >
 > 本文档偏重**设计与原理**。

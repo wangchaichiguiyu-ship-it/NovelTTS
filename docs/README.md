@@ -6,6 +6,8 @@
 | **[API-REFERENCE.md](API-REFERENCE.md)** | **接口规范**：全部 Python API / CLI 参数 / 数据模型 / 异常约定 | 开发可视化界面、二次开发 |
 | [user-guide.md](user-guide.md) | 本机操作：命令命名规范、逐步流程、产物说明、故障排查 | 第一次使用 |
 | [cloud-deployment.md](cloud-deployment.md) | 云端部署：AutoDL + VSCode Remote SSH、NVIDIA 优化、防断线、验证清单 | 要上 GPU 跑全书 |
+| **[TECH-DEBT.md](TECH-DEBT.md)** | **技术债与改进清单**：弱点、重复造轮子、已知取舍，含证据与修法 | **接手项目前必读** |
+| **[PRODUCTIZATION.md](PRODUCTIZATION.md)** | **产品化设计**：做成拖拽式软件的架构、技术栈、风险与实施计划 | 想把它包装成产品 |
 | [git-workflow.md](git-workflow.md) | git 规范、提交约定、查看与回滚命令 | 参与开发 / 管理版本 |
 | [../README.md](../README.md) | 设计原理、目录结构、内存策略、洗稿规则表 | 想了解"为什么这么设计" |
 
@@ -26,6 +28,10 @@
 | 跑出来的音频不对 | [user-guide §6](user-guide.md) |
 | 哪些坑千万别踩 | [overview §10](overview.md)（常见陷阱汇总） |
 | 怎么回滚 / 看历史 | [git-workflow §6](git-workflow.md) |
+| **这个项目哪里做得不好** | [TECH-DEBT.md](TECH-DEBT.md) |
+| **想做成软件，需要什么** | [PRODUCTIZATION.md](PRODUCTIZATION.md) |
+| 情绪控制 / 分角色朗读能不能做 | [PRODUCTIZATION §2.2](PRODUCTIZATION.md)（**关键结论**） |
+| 先做哪些改进最值 | [TECH-DEBT §0](TECH-DEBT.md)（优先级总览） |
 
 ## 按角色找文档
 
