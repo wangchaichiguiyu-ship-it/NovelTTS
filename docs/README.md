@@ -7,6 +7,18 @@
 | [cloud-deployment.md](cloud-deployment.md) | **云端部署**：AutoDL + VSCode Remote SSH、NVIDIA 优化、验证清单 | 要上 GPU 跑全书 |
 | [git-workflow.md](git-workflow.md) | 本仓库的 git 规范、提交约定、查看命令 | 参与开发 / 管理版本 |
 
+## 快速跳转
+
+| 我想知道… | 去哪 |
+|---|---|
+| `--chapter c003` 里的 c003 是什么 | [user-guide §1](user-guide.md) |
+| 云端怎么配环境、怎么传项目 | [cloud-deployment.md](cloud-deployment.md) |
+| 怎么验证环境/项目没问题 | [cloud-deployment §7](cloud-deployment.md)（三层验证清单） |
+| 怎么调语速 | [user-guide §2.6](user-guide.md) 或 `--rate` |
+| 硬件加速有没有生效 | [user-guide §6.3](user-guide.md) |
+| 怎么回滚 / 看历史 | [git-workflow §6](git-workflow.md) |
+| 跑出来的音频不对 | [user-guide §6](user-guide.md) |
+
 ## 按场景找文档
 
 **"我只想赶紧生成有声书"**
